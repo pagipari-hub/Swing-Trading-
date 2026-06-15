@@ -10,12 +10,27 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Get week number
+        id: date
+        run: echo "week=$(date +'%Y-W%V')" >> $GITHUB_OUTPUT
+
+      - name: Cache stock data
+        uses: actions/cache@v4
+        with:
+          path: /tmp/nifty500_cache
+          key: nifty500-${{ steps.date.outputs.week }}
+          restore-keys: |
+            nifty500-
+
       - name: Install dependencies
         run: pip install yfinance pandas numpy ta requests gspread google-auth pytz
+
       - name: Run Screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
