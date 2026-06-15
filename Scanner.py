@@ -6,7 +6,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import ta
+import pandas_ta as ta
 import requests
 import gspread
 import pickle
@@ -318,7 +318,7 @@ for _, r in p1_all.sort_values("total_score", ascending=False).iterrows():
     if sec_count_p1.get(sec, 0) < 3:
         p1_kept.append(r)
         sec_count_p1[sec] = sec_count_p1.get(sec, 0) + 1
-p1_final = pd.DataFrame(p1_kept).reset_index(drop=True)
+p1_final = pd.DataFrame(p1_kept).reset_index(drop=True) if p1_kept else pd.DataFrame(columns=master_df.columns)
 
 print(f"""
 {'='*65}
@@ -696,8 +696,6 @@ def apply_sector_cap(rows):
             overflow.append(r)
     return kept, overflow
 
-kept, overflow = apply_sector_cap(rows_entry)
-
 print("\n[6/6] Building output...")
 
 DCOLS = ["ticker","company","sector","is_cyclical","price","pct_from_high",
@@ -706,18 +704,22 @@ DCOLS = ["ticker","company","sector","is_cyclical","price","pct_from_high",
          "sec_breadth","regime","pillar_a","pillar_b","pillar_c","pillar_d",
          "total_score","label"]
 
-mom_entry = (pd.DataFrame(kept).sort_values("total_score", ascending=False)
-             .reset_index(drop=True) if kept else pd.DataFrame(columns=DCOLS))
+if not rows_entry:
+    print("⚠️  No momentum entry stocks found")
+    mom_entry = pd.DataFrame(columns=DCOLS)
+    mom_sector_overflow = pd.DataFrame(columns=DCOLS)
+else:
+    kept, overflow = apply_sector_cap(rows_entry)
+    mom_entry = (pd.DataFrame(kept).sort_values("total_score", ascending=False)
+                 .reset_index(drop=True) if kept else pd.DataFrame(columns=DCOLS))
+    mom_sector_overflow = (pd.DataFrame(overflow).sort_values("total_score", ascending=False)
+                           .reset_index(drop=True) if overflow else pd.DataFrame(columns=DCOLS))
 
-mom_watch = pd.DataFrame(rows_watch)
-if not mom_watch.empty:
+mom_watch = pd.DataFrame(rows_watch) if rows_watch else pd.DataFrame(columns=DCOLS)
+if not mom_watch.empty and "pillar_a" in mom_watch.columns:
     mom_watch = (mom_watch[mom_watch["pillar_a"] >= WATCH_MIN_A]
                  .sort_values(["pct_from_high","rsi"], ascending=[True,False])
                  .reset_index(drop=True))
-
-mom_sector_overflow = (pd.DataFrame(overflow)
-                       .sort_values("total_score", ascending=False)
-                       .reset_index(drop=True) if overflow else pd.DataFrame(columns=DCOLS))
 
 print(f"""
 {'='*65}
