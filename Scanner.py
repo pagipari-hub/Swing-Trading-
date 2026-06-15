@@ -306,7 +306,7 @@ for ticker in nifty500:
 
 master_df = (pd.DataFrame(rows_all)
              .sort_values("total_score", ascending=False)
-             .reset_index(drop=True))
+             .reset_index(drop=True)) if rows_all else pd.DataFrame()
 
 p2_final = (master_df[master_df["phase"] == "Phase 2 - Entry Ready"]
             .reset_index(drop=True))
