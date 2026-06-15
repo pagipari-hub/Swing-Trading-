@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install yfinance pandas numpy pandas_ta requests gspread google-auth pytz
+        run: pip install yfinance pandas numpy ta requests gspread google-auth pytz
       - name: Run Screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
