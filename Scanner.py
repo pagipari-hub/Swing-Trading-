@@ -217,7 +217,7 @@ for ticker in nifty500:
         company  = company_lookup.get(ticker, ticker)
         sector   = sector_lookup.get(ticker, "Unknown")
 
-        rsi_s   = ta.rsi(close, length=14)
+        rsi_s   = ta.momentum.RSIIndicator(close, window=14).rsi()
         if rsi_s is None or rsi_s.dropna().shape[0] < 5:
             continue
         rsi_sma  = rsi_s.rolling(14).mean()
@@ -304,12 +304,18 @@ for ticker in nifty500:
     except Exception:
         continue
 
-master_df = (pd.DataFrame(rows_all)
-             .sort_values("total_score", ascending=False)
-             .reset_index(drop=True)) if rows_all else pd.DataFrame()
+CONTRA_EMPTY_COLS = ["ticker","company","sector","price","drawdown","rsi","rsi_sma","cross_week","vol_ratio","promoter","de_ratio","earn_gr","pe","pillar_a","pillar_b","total_score","phase"]
+
+if rows_all:
+    master_df = (pd.DataFrame(rows_all)
+                 .sort_values("total_score", ascending=False)
+                 .reset_index(drop=True))
+else:
+    print("⚠️  No contra stocks found")
+    master_df = pd.DataFrame(columns=CONTRA_EMPTY_COLS)
 
 p2_final = (master_df[master_df["phase"] == "Phase 2 - Entry Ready"]
-            .reset_index(drop=True))
+            .reset_index(drop=True)) if not master_df.empty else pd.DataFrame(columns=CONTRA_EMPTY_COLS)
 
 p1_all = master_df[master_df["phase"] == "Phase 1 - Watchlist"].copy()
 sec_count_p1 = {}; p1_kept = []
@@ -392,7 +398,7 @@ try:
         nifty_close = nf["Close"].squeeze()
 
     n_sma30 = nifty_close.rolling(30).mean().iloc[-1]
-    n_rsi   = ta.rsi(nifty_close, length=14).iloc[-1]
+    n_rsi   = ta.momentum.RSIIndicator(nifty_close, window=14).rsi().iloc[-1]
     n_price = nifty_close.iloc[-1]
 
     if n_price < n_sma30 and n_rsi < 50:
@@ -518,7 +524,7 @@ for ticker in nifty500:
         sma20 = close.rolling(20).mean().iloc[-1]
         sma50 = close.rolling(50).mean().iloc[-1]
 
-        rsi_s = ta.rsi(close, length=14)
+        rsi_s = ta.momentum.RSIIndicator(close, window=14).rsi()
         if rsi_s is None or rsi_s.dropna().shape[0] < 5:
             continue
         rsi_now = rsi_s.iloc[-1]
@@ -548,7 +554,7 @@ for ticker in nifty500:
             else:
                 break
 
-        atr_s = ta.atr(high_s, low_s, close, length=14)
+        atr_s = ta.volatility.AverageTrueRange(high_s, low_s, close, window=14).average_true_range()
         try:
             atr_exp = (atr_s.iloc[-1] / atr_s.iloc[-9] - 1) * 100
         except Exception:
