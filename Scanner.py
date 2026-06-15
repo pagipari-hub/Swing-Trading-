@@ -881,7 +881,7 @@ Top P2:
 Top Entry:
 <pre>{mom_top}</pre>
 
-🔗 Sheet updated ✅"""
+🔗<a href="{sh.url}">Google Sheet kholo</a>"""
 
     send_telegram(tg_msg)
 
