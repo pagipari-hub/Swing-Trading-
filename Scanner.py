@@ -742,7 +742,7 @@ MOMENTUM SCREENER | Regime: {regime}
 # ============================================================
 
 SHEET_NAME    = "Nifty500 Screener"
-MAX_SNAPSHOTS = 3
+MAX_SNAPSHOTS = 999
 
 CONTRA_COLS   = ["ticker", "company", "sector", "price", "total_score", "phase"]
 MOMENTUM_COLS = ["ticker", "company", "sector", "is_cyclical", "price", "total_score", "label"]
@@ -760,7 +760,8 @@ try:
         print(f"📄 Created new: {SHEET_NAME}")
 
     timestamp = datetime.now().strftime("%d %b %Y %H:%M")
-    date_tag  = datetime.now().strftime("%d%b%y")
+    _iso = datetime.now().isocalendar()
+    date_tag  = f"{_iso.year}-W{_iso.week:02d}"
 
     TAB_GROUPS = [
         ("P2 Entry",     p2_final),
@@ -777,6 +778,9 @@ try:
         else:
             show_cols = CONTRA_COLS
 
+        df = df.copy()
+        df.insert(0, "week", date_tag)
+        show_cols = ["week"] + show_cols
         available = [c for c in show_cols if c in df.columns]
         df_out    = df[available].copy().fillna("").astype(str)
         data      = [df_out.columns.tolist()] + df_out.values.tolist()
@@ -813,13 +817,13 @@ try:
 
     all_tabs      = sh.worksheets()
     tab_titles    = [ws.title for ws in all_tabs]
-    date_pattern  = re.compile(r"\[(\d{2}[A-Za-z]{3}\d{2})\]")
+    date_pattern  = re.compile(r"\[(\d{4}-W\d{2})\]")
 
     found_dates = sorted(set(
         m.group(1)
         for t in tab_titles
         for m in [date_pattern.search(t)] if m
-    ), key=lambda d: datetime.strptime(d, "%d%b%y"))
+    ), key=lambda d: d)
 
     dates_to_delete = found_dates[:-MAX_SNAPSHOTS] if len(found_dates) > MAX_SNAPSHOTS else []
 
