@@ -772,78 +772,189 @@ MOMENTUM SCREENER | Regime: {regime}
 """)
 
 # ============================================================
-# SECTION 6 — Export to Google Sheets (append rows)
+# SECTION 6 — Export to Google Sheets (transposed structure)
+#
+# Structure:
+#   Col A : key  (ticker|metric)  — for VLOOKUP
+#   Col B : metric name
+#   Col C : ticker
+#   Col D : company
+#   Col E : sector
+#   Col F : is_cyclical  (Momentum only; Contra sheet skips this)
+#   Col F/G+ : W23, W24, W25 ...  (week columns, added right)
+#
+# Each stock occupies N rows (one per metric).
+# New week = new column added to the right. No rows added.
+# First run builds the entire structure. Subsequent runs just
+# find the next empty column and write values.
 # ============================================================
 
 print("\n[5/5] Exporting to Google Sheets...")
 
 SHEET_NAME = "Nifty500 Screener"
 
-# Exact column order per spec
-CONTRA_COLS  = ["week","ticker","company","sector","price",
-                "score","phase","RSI","drawdown","de_ratio",
-                "cross_week","vol_ratio","promoter","sales_gr",
-                "pat_gr","pillar_a","pillar_b"]
+# Metrics in row order
+CONTRA_METRICS = [
+    "price", "total_score", "phase", "RSI", "drawdown", "de_ratio",
+    "cross_week", "vol_ratio", "promoter", "sales_gr", "pat_gr",
+    "pillar_a", "pillar_b"
+]
 
-MOMENTUM_COLS = ["week","ticker","company","sector","price",
-                 "score","label","RSI","rs_periods","earn_gr",
-                 "pct_from_high","vol_ratio","atr_exp",
-                 "pillar_a","pillar_b","pillar_c","pillar_d"]
+MOMENTUM_METRICS = [
+    "price", "total_score", "label", "RSI", "rs_periods", "earn_gr",
+    "pct_from_high", "vol_ratio", "atr_exp",
+    "pillar_a", "pillar_b", "pillar_c", "pillar_d"
+]
 
-def ensure_worksheet(sh, name, rows=2000, cols=25):
-    """Get existing worksheet or create it with a header row."""
+def ensure_worksheet(sh, name, rows=15000, cols=300):
     try:
         return sh.worksheet(name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=name, rows=rows, cols=cols)
         return ws
 
-def append_to_sheet(ws, df, cols):
-    """
-    Append df rows to ws.
-    - If sheet is empty (no data rows), write header first then data.
-    - If sheet already has data, append only data rows.
-    """
-    available = [c for c in cols if c in df.columns]
-    df_out    = df[available].copy().fillna("").astype(str)
-    data_rows = df_out.values.tolist()
+def col_letter(n):
+    """Convert 1-based column index to A, B, ... Z, AA, AB ..."""
+    result = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        result = chr(65 + rem) + result
+    return result
 
-    # Check whether the sheet already has a header
-    existing  = ws.get_all_values()
-    has_header = len(existing) > 0 and len(existing[0]) > 0
+def build_transposed_sheet(ws, df, metrics, week_tag, has_cyclical=False):
+    """
+    Build or update a transposed sheet.
 
-    if not has_header:
-        # Write header + data starting at A1
-        ws.update(values=[available] + data_rows, range_name="A1")
-        print(f"   ✅ '{ws.title}' — header + {len(data_rows)} rows written")
+    Fixed columns (1-based):
+      1: key (ticker|metric)
+      2: metric
+      3: ticker
+      4: company
+      5: sector
+      6: is_cyclical  (only if has_cyclical=True)
+      first_week_col: W23, W24 ...
+
+    On first run  → write everything from scratch.
+    On subsequent → find week_tag column (or add new one) and fill values.
+    """
+    fixed_cols   = 6 if has_cyclical else 5
+    first_wk_col = fixed_cols + 1   # 1-based
+
+    existing = ws.get_all_values()   # list of lists
+
+    # ── CASE 1: Sheet is empty → build from scratch ───────────
+    if not existing or not existing[0]:
+        print(f"   📄 '{ws.title}' — first run, building structure...")
+
+        # Header row
+        header = ["key", "metric", "ticker", "company", "sector"]
+        if has_cyclical:
+            header.append("is_cyclical")
+        header.append(week_tag)
+
+        all_rows = [header]
+
+        tickers_sorted = sorted(df["ticker"].unique())
+        for ticker in tickers_sorted:
+            row_df  = df[df["ticker"] == ticker]
+            if row_df.empty:
+                continue
+            r       = row_df.iloc[0]
+            company = str(r.get("company", ""))
+            sector  = str(r.get("sector", ""))
+            is_cyc  = str(r.get("is_cyclical", "")) if has_cyclical else None
+
+            for metric in metrics:
+                key = f"{ticker}|{metric}"
+                val = str(r.get(metric, "—")) if not row_df.empty else "—"
+                row = [key, metric, ticker, company, sector]
+                if has_cyclical:
+                    row.append(is_cyc)
+                row.append(val)
+                all_rows.append(row)
+
+        ws.update(values=all_rows, range_name="A1")
+        print(f"   ✅ '{ws.title}' — {len(all_rows)-1} rows written, week col: {col_letter(first_wk_col+1)} ({week_tag})")
+        return
+
+    # ── CASE 2: Sheet exists → find or add week column ────────
+    header_row = existing[0]
+
+    # Check if week_tag already exists
+    if week_tag in header_row:
+        week_col_idx = header_row.index(week_tag) + 1   # 1-based
+        print(f"   ⚠️  '{ws.title}' — {week_tag} already exists at col {col_letter(week_col_idx)}, overwriting...")
     else:
-        # Append data below last row
-        next_row = len(existing) + 1
-        if data_rows:
-            ws.update(values=data_rows,
-                      range_name=f"A{next_row}")
-        print(f"   ✅ '{ws.title}' — {len(data_rows)} rows appended (sheet now {next_row + len(data_rows) - 1} rows)")
+        # Find first empty column in header row
+        week_col_idx = len(header_row) + 1
+        # Write week_tag in header
+        ws.update(values=[[week_tag]],
+                  range_name=f"{col_letter(week_col_idx)}1")
+        print(f"   📅 '{ws.title}' — New week col {col_letter(week_col_idx)} = {week_tag}")
+
+    # Build key→value map from df
+    val_map = {}
+    for _, r in df.iterrows():
+        ticker = r.get("ticker", "")
+        for metric in metrics:
+            key = f"{ticker}|{metric}"
+            val_map[key] = str(r.get(metric, "—"))
+
+    # Match each data row by key (col A = index 0) and collect updates
+    updates = []
+    for row_idx, row in enumerate(existing[1:], start=2):   # row_idx is 1-based sheet row
+        if not row:
+            continue
+        key = row[0] if row else ""
+        val = val_map.get(key, "—")
+        updates.append({
+            "range": f"{col_letter(week_col_idx)}{row_idx}",
+            "values": [[val]]
+        })
+
+    # Batch update in chunks of 500 to avoid API limits
+    chunk = 500
+    for i in range(0, len(updates), chunk):
+        ws.batch_update(updates[i:i+chunk])
+        if i + chunk < len(updates):
+            time.sleep(1)
+
+    print(f"   ✅ '{ws.title}' — {len(updates)} cells updated for {week_tag}")
+
+# ── Prepare dataframes with correct column names ─────────────
+
+# Contra: rename score→total_score
+contra_export = contra_df.rename(columns={"score": "total_score"}).copy()
+
+# Momentum: rename score→total_score, add is_cyclical
+momentum_export = momentum_df.rename(columns={"score": "total_score"}).copy()
+momentum_export["is_cyclical"] = momentum_export["ticker"].apply(
+    lambda t: "Yes" if sector_lookup.get(t, "") in CYCLICAL_NSE else "No"
+)
 
 try:
     gc = get_gspread_client()
 
     try:
         sh = gc.open(SHEET_NAME)
-        print(f"✅ Opened existing: {SHEET_NAME}")
+        print(f"✅ Opened existing spreadsheet: {SHEET_NAME}")
     except gspread.SpreadsheetNotFound:
         sh = gc.create(SHEET_NAME)
-        print(f"📄 Created new: {SHEET_NAME}")
+        print(f"📄 Created new spreadsheet: {SHEET_NAME}")
 
     # ── Contra Data ───────────────────────────────────────────
-    ws_contra = ensure_worksheet(sh, "Contra Data", rows=60000, cols=20)
-    append_to_sheet(ws_contra, contra_df, CONTRA_COLS)
+    ws_contra = ensure_worksheet(sh, "Contra Data", rows=15000, cols=300)
+    build_transposed_sheet(ws_contra, contra_export, CONTRA_METRICS,
+                           WEEK_TAG, has_cyclical=False)
 
     # ── Momentum Data ─────────────────────────────────────────
-    ws_mom = ensure_worksheet(sh, "Momentum Data", rows=60000, cols=20)
-    append_to_sheet(ws_mom, momentum_df, MOMENTUM_COLS)
+    ws_mom = ensure_worksheet(sh, "Momentum Data", rows=15000, cols=300)
+    build_transposed_sheet(ws_mom, momentum_export, MOMENTUM_METRICS,
+                           WEEK_TAG, has_cyclical=True)
 
-    # Sheets "Contra Entry", "Mom Entry", "Dashboard" are managed
-    # separately by user — Scanner does NOT touch them.
+    # "Contra Entry", "Mom Entry", "Dashboard" — user manages via
+    # VLOOKUP/INDEX-MATCH formulas referencing Contra Data + Momentum Data.
+    # Scanner does NOT touch these sheets.
 
     print(f"""
 {'='*55}
