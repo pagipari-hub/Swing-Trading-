@@ -1,6 +1,7 @@
 # ============================================================
 # Contra + Momentum Screener | NSE Nifty 500 | yfinance
-# GitHub Actions version — no Colab dependency
+# GitHub Actions version — append rows to "Contra Data" and
+# "Momentum Data" sheets; all 500 stocks every week.
 # ============================================================
 
 import yfinance as yf
@@ -25,9 +26,15 @@ pd.set_option("display.max_columns", 25)
 pd.set_option("display.width", 140)
 pd.set_option("display.float_format", "{:.2f}".format)
 
+# ── Week tag ─────────────────────────────────────────────────
+_iso     = datetime.now().isocalendar()
+WEEK_TAG = f"{_iso.year}-W{_iso.week:02d}"   # e.g. 2026-W24
+TIMESTAMP = datetime.now().strftime("%d %b %Y %H:%M")
+
 print("✅ All libraries loaded.")
-print(f"📅 Run date: {datetime.today().strftime('%d %b %Y')}")
-print(f"📊 Universe: Nifty 500 | Contra + Momentum Screener")
+print(f"📅 Run date   : {datetime.today().strftime('%d %b %Y')}")
+print(f"🗓️  Week tag   : {WEEK_TAG}")
+print(f"📊 Universe   : Nifty 500 | Contra + Momentum Screener")
 
 # ── Telegram config ──────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -61,7 +68,7 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 # ============================================================
-# CELL 2 — Load Nifty 500 Tickers from NSE
+# SECTION 1 — Load Nifty 500 Tickers from NSE
 # ============================================================
 
 def load_nifty500_tickers():
@@ -87,8 +94,8 @@ def load_nifty500_tickers():
         print(f"⚠️  NSE fetch failed: {e}")
         return pd.DataFrame(columns=["symbol","company","sector","yf_ticker"])
 
-nifty500_df   = load_nifty500_tickers()
-nifty500      = nifty500_df["yf_ticker"].tolist()
+nifty500_df    = load_nifty500_tickers()
+nifty500       = nifty500_df["yf_ticker"].tolist()
 sector_lookup  = dict(zip(nifty500_df["yf_ticker"], nifty500_df["sector"]))
 company_lookup = dict(zip(nifty500_df["yf_ticker"], nifty500_df["company"]))
 
@@ -97,15 +104,14 @@ print(nifty500_df["sector"].value_counts().to_string())
 print(f"\n🔖 Sample: {nifty500[:5]}")
 
 # ============================================================
-# CELL 3 — Cache: price_data + fund_data + q_fin_data
-# Uses local /tmp folder (GitHub Actions runner)
+# SECTION 2 — Cache: price_data + fund_data (weekly)
+#              q_fin_data: always fresh (no cache)
 # ============================================================
 
 CACHE_DIR     = "/tmp/nifty500_cache"
 PRICE_FILE    = os.path.join(CACHE_DIR, "price_data.pkl")
 FUND_FILE     = os.path.join(CACHE_DIR, "fund_data.pkl")
-QFIN_FILE     = os.path.join(CACHE_DIR, "q_fin_data.pkl")
-NIFTY500_FILE = os.path.join(CACHE_DIR, "nifty500_df.pkl")
+# NOTE: q_fin_data is intentionally NOT cached — fresh every run
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -115,25 +121,22 @@ def load_or_build(filepath, build_fn, label):
             data = pickle.load(f)
         print(f"✅ {label} loaded from cache — {len(data)} tickers")
         return data
-    else:
-        print(f"📥 Building {label}...")
-        data = build_fn()
-        with open(filepath, "wb") as f:
-            pickle.dump(data, f)
-        print(f"✅ {label} saved — {len(data)} tickers")
-        return data
+    print(f"📥 Building {label}...")
+    data = build_fn()
+    with open(filepath, "wb") as f:
+        pickle.dump(data, f)
+    print(f"✅ {label} saved — {len(data)} tickers")
+    return data
 
 def build_price_data():
-    data   = {}
-    errors = []
+    data = {}; errors = []
     for i, ticker in enumerate(nifty500):
         try:
             df = yf.download(ticker, period="5y", interval="1wk",
                              auto_adjust=True, progress=False)
             data[ticker] = df if len(df) > 50 else None
         except Exception:
-            errors.append(ticker)
-            data[ticker] = None
+            errors.append(ticker); data[ticker] = None
         if (i + 1) % 100 == 0:
             print(f"  {i+1}/{len(nifty500)} price done...")
         time.sleep(0.1)
@@ -141,8 +144,7 @@ def build_price_data():
     return data
 
 def build_fund_data():
-    data   = {}
-    errors = []
+    data = {}; errors = []
     fields = ["trailingPE","earningsGrowth","trailingEps","forwardEps",
               "revenueGrowth","profitMargins","promoterHolding",
               "floatShares","sharesOutstanding","debtToEquity",
@@ -152,8 +154,7 @@ def build_fund_data():
             info = yf.Ticker(ticker).info
             data[ticker] = {k: info.get(k) for k in fields}
         except Exception:
-            errors.append(ticker)
-            data[ticker] = {}
+            errors.append(ticker); data[ticker] = {}
         if (i + 1) % 100 == 0:
             print(f"  {i+1}/{len(nifty500)} fund done...")
         time.sleep(0.1)
@@ -161,39 +162,33 @@ def build_fund_data():
     return data
 
 def build_q_fin_data():
-    data   = {}
-    errors = []
+    """Always fresh — no cache."""
+    data = {}; errors = []
     for i, ticker in enumerate(nifty500):
         try:
             data[ticker] = yf.Ticker(ticker).quarterly_financials
         except Exception:
-            errors.append(ticker)
-            data[ticker] = None
+            errors.append(ticker); data[ticker] = None
         if (i + 1) % 100 == 0:
             print(f"  {i+1}/{len(nifty500)} qfin done...")
         time.sleep(0.1)
     print(f"  ⚠️  QFin errors: {len(errors)}")
     return data
 
-price_data = load_or_build(PRICE_FILE,   build_price_data,  "price_data")
-fund_data  = load_or_build(FUND_FILE,    build_fund_data,   "fund_data")
-q_fin_data = load_or_build(QFIN_FILE,    build_q_fin_data,  "q_fin_data")
+price_data = load_or_build(PRICE_FILE, build_price_data, "price_data")
+fund_data  = load_or_build(FUND_FILE,  build_fund_data,  "fund_data")
 
-with open(NIFTY500_FILE, "wb") as f:
-    pickle.dump(nifty500_df, f)
+print(f"\n📥 Building q_fin_data (always fresh)...")
+q_fin_data = build_q_fin_data()
 
-print(f"\n✅ All cache ready.")
-print(f"   price_data : {sum(1 for v in price_data.values() if v is not None)} valid tickers")
-print(f"   fund_data  : {sum(1 for v in fund_data.values() if v) } valid tickers")
-print(f"   q_fin_data : {sum(1 for v in q_fin_data.values() if v is not None)} valid tickers")
+print(f"\n✅ All data ready.")
+print(f"   price_data : {sum(1 for v in price_data.values() if v is not None)} valid")
+print(f"   fund_data  : {sum(1 for v in fund_data.values() if v)} valid")
+print(f"   q_fin_data : {sum(1 for v in q_fin_data.values() if v is not None)} valid")
 
 # ============================================================
-# CELL 4 — Contra Screener
+# SECTION 3 — Helpers
 # ============================================================
-
-print("=" * 65)
-print("CONTRA SCREENER")
-print("=" * 65)
 
 def safe_get(d, key, default=None):
     try:
@@ -201,167 +196,6 @@ def safe_get(d, key, default=None):
         return default if (v is None or (isinstance(v, float) and np.isnan(v))) else v
     except Exception:
         return default
-
-rows_all = []
-
-for ticker in nifty500:
-    df   = price_data.get(ticker)
-    info = fund_data.get(ticker, {})
-    if df is None or len(df) < 60:
-        continue
-
-    try:
-        close    = df["Close"].squeeze()
-        volume   = df["Volume"].squeeze()
-        price    = close.iloc[-1]
-        company  = company_lookup.get(ticker, ticker)
-        sector   = sector_lookup.get(ticker, "Unknown")
-
-        rsi_s   = ta.momentum.RSIIndicator(close, window=14).rsi()
-        if rsi_s is None or rsi_s.dropna().shape[0] < 5:
-            continue
-        rsi_sma  = rsi_s.rolling(14).mean()
-        rsi      = rsi_s.iloc[-1]
-        rsi_sm   = rsi_sma.iloc[-1]
-
-        vol_avg   = volume.iloc[-14:-1].mean()
-        vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
-
-        high_52w  = df["High"].squeeze().iloc[-52:].max()
-        drawdown  = (high_52w - price) / high_52w * 100
-
-        promoter  = safe_get(info, "promoterHolding", 0)
-        de_ratio  = safe_get(info, "debtToEquity",    999)
-        earn_gr   = safe_get(info, "earningsGrowth",  0)
-        if earn_gr and abs(earn_gr) < 5:
-            earn_gr = earn_gr * 100
-        pe        = safe_get(info, "trailingPE", 999)
-
-        a1 = (20 if drawdown >= 40 else
-              15 if drawdown >= 30 else
-              10 if drawdown >= 20 else 0)
-        a2 = (10 if (promoter and promoter >= 50) else
-               5 if (promoter and promoter >= 35) else 0)
-        a3 = (10 if (de_ratio and de_ratio < 0.5) else
-               5 if (de_ratio and de_ratio < 1.5) else 0)
-        pillar_a = a1 + a2 + a3
-
-        cross_week = None
-        for w in range(3):
-            r_now   = rsi_s.iloc[-(w+1)]
-            r_prev  = rsi_s.iloc[-(w+2)]
-            rs_now  = rsi_sma.iloc[-(w+1)]
-            rs_prev = rsi_sma.iloc[-(w+2)]
-            if r_now > rs_now and r_prev <= rs_prev:
-                cross_week = w
-                break
-
-        if   cross_week == 0: b1 = 30
-        elif cross_week == 1: b1 = 22
-        elif cross_week == 2: b1 = 15
-        elif rsi > rsi_sm:    b1 = 8
-        else:                 b1 = 0
-
-        b2 = (20 if rsi < 30 else
-              15 if rsi < 40 else
-              10 if rsi < 50 else 0)
-        b3 = (10 if vol_ratio >= 3   else
-               7 if vol_ratio >= 2   else
-               4 if vol_ratio >= 1.5 else 0)
-        pillar_b = b1 + b2 + b3
-        total    = pillar_a + pillar_b
-
-        rsi_cross_up = cross_week is not None
-        if rsi_cross_up and total >= 50:
-            phase = "Phase 2 - Entry Ready"
-        elif rsi < rsi_sm and drawdown >= 20 and vol_ratio >= 1.5:
-            phase = "Phase 1 - Watchlist"
-        elif total >= 30:
-            phase = "On Radar"
-        else:
-            phase = "Below Threshold"
-
-        rows_all.append({
-            "ticker":      ticker,
-            "company":     company,
-            "sector":      sector,
-            "price":       round(price, 2),
-            "drawdown":    round(drawdown, 1),
-            "rsi":         round(rsi, 1),
-            "rsi_sma":     round(rsi_sm, 1),
-            "cross_week":  cross_week if cross_week is not None else "—",
-            "vol_ratio":   round(vol_ratio, 2),
-            "promoter":    round(promoter, 1) if promoter else "—",
-            "de_ratio":    round(de_ratio, 2) if de_ratio != 999 else "—",
-            "earn_gr":     round(earn_gr, 1) if earn_gr else "—",
-            "pe":          round(pe, 1) if pe != 999 else "—",
-            "pillar_a":    pillar_a,
-            "pillar_b":    pillar_b,
-            "total_score": total,
-            "phase":       phase,
-        })
-
-    except Exception:
-        continue
-
-CONTRA_EMPTY_COLS = ["ticker","company","sector","price","drawdown","rsi","rsi_sma","cross_week","vol_ratio","promoter","de_ratio","earn_gr","pe","pillar_a","pillar_b","total_score","phase"]
-
-if rows_all:
-    master_df = (pd.DataFrame(rows_all)
-                 .sort_values("total_score", ascending=False)
-                 .reset_index(drop=True))
-else:
-    print("⚠️  No contra stocks found")
-    master_df = pd.DataFrame(columns=CONTRA_EMPTY_COLS)
-
-p2_final = (master_df[master_df["phase"] == "Phase 2 - Entry Ready"]
-            .reset_index(drop=True)) if not master_df.empty else pd.DataFrame(columns=CONTRA_EMPTY_COLS)
-
-p1_all = master_df[master_df["phase"] == "Phase 1 - Watchlist"].copy()
-sec_count_p1 = {}; p1_kept = []
-for _, r in p1_all.sort_values("total_score", ascending=False).iterrows():
-    sec = r["sector"]
-    if sec_count_p1.get(sec, 0) < 3:
-        p1_kept.append(r)
-        sec_count_p1[sec] = sec_count_p1.get(sec, 0) + 1
-p1_final = pd.DataFrame(p1_kept).reset_index(drop=True) if p1_kept else pd.DataFrame(columns=master_df.columns)
-
-print(f"""
-{'='*65}
-CONTRA SCREENER RESULTS
-{'='*65}
-  Phase 2 Entry Ready : {len(p2_final)}
-  Phase 1 Watchlist   : {len(p1_final)}
-  On Radar            : {len(master_df[master_df['phase']=='On Radar'])}
-  Total screened      : {len(master_df)}
-{'='*65}
-""")
-
-# ============================================================
-# CELL 5 — Momentum Screener
-# ============================================================
-
-print("=" * 65)
-print("MOMENTUM SCREENER — Full Build")
-print("=" * 65)
-
-WEEKS_VALID    = 3
-RSI_UPPER      = 75
-DIST_HIGH_MAX  = 20
-LIQ_HARD       = 10
-LIQ_THIN       = 20
-VOL_WINDOW     = 13
-RAW_MAX        = 120
-WATCH_MIN_A    = 20
-
-CYCLICAL_NSE = {
-    "Metals & Mining", "Oil Gas & Consumable Fuels",
-    "Construction", "Construction Materials",
-    "Automobile and Auto Components", "Capital Goods",
-    "Power", "Chemicals"
-}
-
-NIFTY500_INDEX = "^CRSLDX"
 
 def pct_ret(series, periods):
     try:
@@ -384,8 +218,192 @@ def yoy_growth(series):
     except Exception:
         return None
 
-print("\n[1/6] Market Regime...")
+def fmt(val, decimals=2, fallback="—"):
+    """Format a numeric value; return fallback string if None/nan/999."""
+    try:
+        if val is None or (isinstance(val, float) and (np.isnan(val) or val == 999)):
+            return fallback
+        return round(float(val), decimals)
+    except Exception:
+        return fallback
+
+# ============================================================
+# SECTION 4 — CONTRA SCREENER (all 500 stocks)
+# ============================================================
+
+print("\n" + "=" * 65)
+print("CONTRA SCREENER")
+print("=" * 65)
+
+contra_rows = []   # will hold ALL stocks (500) for sheet export
+
+for ticker in nifty500:
+    df   = price_data.get(ticker)
+    info = fund_data.get(ticker, {})
+    if df is None or len(df) < 60:
+        continue
+
+    try:
+        close   = df["Close"].squeeze()
+        volume  = df["Volume"].squeeze()
+        price   = close.iloc[-1]
+        company = company_lookup.get(ticker, ticker)
+        sector  = sector_lookup.get(ticker, "Unknown")
+
+        # ── RSI(14) and its 14-week SMA ──────────────────────
+        rsi_s  = ta.momentum.RSIIndicator(close, window=14).rsi()
+        if rsi_s is None or rsi_s.dropna().shape[0] < 5:
+            continue
+        rsi_sma = rsi_s.rolling(14).mean()
+        rsi     = rsi_s.iloc[-1]
+        rsi_sm  = rsi_sma.iloc[-1]
+
+        # ── Volume ratio ──────────────────────────────────────
+        vol_avg   = volume.iloc[-14:-1].mean()
+        vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
+
+        # ── 52-week drawdown ─────────────────────────────────
+        high_52w = df["High"].squeeze().iloc[-52:].max()
+        drawdown = (high_52w - price) / high_52w * 100
+
+        # ── Fundamentals ──────────────────────────────────────
+        promoter = safe_get(info, "promoterHolding", 0)
+        de_ratio = safe_get(info, "debtToEquity",    999)
+
+        # ── Sales & PAT growth from quarterly financials ──────
+        sales_gr = pat_gr = None
+        qfin = q_fin_data.get(ticker)
+        if qfin is not None and not qfin.empty:
+            for k in ["Total Revenue", "Revenue"]:
+                if k in qfin.index:
+                    sales_gr = yoy_growth(qfin.loc[k]); break
+            for k in ["Net Income", "Net Income Common Stockholders"]:
+                if k in qfin.index:
+                    pat_gr = yoy_growth(qfin.loc[k]); break
+
+        # ── Pillar A: Value / Fundamentals (max 40) ───────────
+        a1 = (20 if drawdown >= 40 else
+              15 if drawdown >= 30 else
+              10 if drawdown >= 20 else 0)
+        a2 = (10 if (promoter and promoter >= 50) else
+               5 if (promoter and promoter >= 35) else 0)
+        a3 = (10 if (de_ratio and de_ratio < 0.5) else
+               5 if (de_ratio and de_ratio < 1.5) else 0)
+        pillar_a = a1 + a2 + a3
+
+        # ── RSI cross (within last 3 weeks) ──────────────────
+        cross_week = None
+        for w in range(3):
+            r_now   = rsi_s.iloc[-(w+1)]
+            r_prev  = rsi_s.iloc[-(w+2)]
+            rs_now  = rsi_sma.iloc[-(w+1)]
+            rs_prev = rsi_sma.iloc[-(w+2)]
+            if r_now > rs_now and r_prev <= rs_prev:
+                cross_week = w
+                break
+
+        # ── Pillar B: Momentum / Signal (max 60) ─────────────
+        if   cross_week == 0: b1 = 30
+        elif cross_week == 1: b1 = 22
+        elif cross_week == 2: b1 = 15
+        elif rsi > rsi_sm:    b1 = 8
+        else:                 b1 = 0
+
+        b2 = (20 if rsi < 30 else
+              15 if rsi < 40 else
+              10 if rsi < 50 else 0)
+        b3 = (10 if vol_ratio >= 3   else
+               7 if vol_ratio >= 2   else
+               4 if vol_ratio >= 1.5 else 0)
+        pillar_b = b1 + b2 + b3
+        total    = pillar_a + pillar_b
+
+        # ── Phase label ───────────────────────────────────────
+        if cross_week is not None and total >= 50:
+            phase = "Phase 2 - Entry Ready"
+        elif rsi < rsi_sm and drawdown >= 20 and vol_ratio >= 1.5:
+            phase = "Phase 1 - Watchlist"
+        elif total >= 30:
+            phase = "On Radar"
+        else:
+            phase = "Below Threshold"
+
+        # ── Append row (exact column spec) ───────────────────
+        contra_rows.append({
+            "week":       WEEK_TAG,
+            "ticker":     ticker,
+            "company":    company,
+            "sector":     sector,
+            "price":      fmt(price, 2),
+            "score":      total,
+            "phase":      phase,
+            "RSI":        fmt(rsi, 1),
+            "drawdown":   fmt(drawdown, 1),
+            "de_ratio":   fmt(de_ratio, 2) if de_ratio != 999 else "—",
+            "cross_week": cross_week if cross_week is not None else "—",
+            "vol_ratio":  fmt(vol_ratio, 2),
+            "promoter":   fmt(promoter, 1) if promoter else "—",
+            "sales_gr":   fmt(sales_gr, 1) if sales_gr is not None else "—",
+            "pat_gr":     fmt(pat_gr, 1)   if pat_gr   is not None else "—",
+            "pillar_a":   pillar_a,
+            "pillar_b":   pillar_b,
+        })
+
+    except Exception:
+        continue
+
+contra_df = pd.DataFrame(contra_rows) if contra_rows else pd.DataFrame(columns=[
+    "week","ticker","company","sector","price","score","phase",
+    "RSI","drawdown","de_ratio","cross_week","vol_ratio","promoter",
+    "sales_gr","pat_gr","pillar_a","pillar_b"
+])
+
+# Derived views (for Telegram summary only — not written to sheets)
+p2_df = contra_df[contra_df["phase"] == "Phase 2 - Entry Ready"].copy()
+p1_df = contra_df[contra_df["phase"] == "Phase 1 - Watchlist"].copy()
+
+print(f"""
+{'='*65}
+CONTRA SCREENER RESULTS
+{'='*65}
+  Total rows built    : {len(contra_df)}
+  Phase 2 Entry Ready : {len(p2_df)}
+  Phase 1 Watchlist   : {len(p1_df)}
+  On Radar            : {len(contra_df[contra_df['phase']=='On Radar'])}
+  Below Threshold     : {len(contra_df[contra_df['phase']=='Below Threshold'])}
+{'='*65}
+""")
+
+# ============================================================
+# SECTION 5 — MOMENTUM SCREENER (all 500 stocks)
+# ============================================================
+
+print("=" * 65)
+print("MOMENTUM SCREENER — Full Build")
+print("=" * 65)
+
+WEEKS_VALID   = 3
+RSI_UPPER     = 75
+DIST_HIGH_MAX = 20
+LIQ_HARD      = 10
+LIQ_THIN      = 20
+VOL_WINDOW    = 13
+RAW_MAX       = 120
+WATCH_MIN_A   = 20
+
+CYCLICAL_NSE = {
+    "Metals & Mining", "Oil Gas & Consumable Fuels",
+    "Construction", "Construction Materials",
+    "Automobile and Auto Components", "Capital Goods",
+    "Power", "Chemicals"
+}
+
+NIFTY500_INDEX = "^CRSLDX"
+
+# ── Market Regime ────────────────────────────────────────────
+print("\n[1/5] Market Regime...")
 regime = "Risk-On"; regime_mult = 1.0
+nifty_close = None
 
 try:
     nf = price_data.get(NIFTY500_INDEX)
@@ -409,30 +427,33 @@ try:
 except Exception as e:
     print(f"  ⚠️  Regime check failed ({e})")
 
-print("\n[2/6] Index reference returns...")
+# ── Index reference returns ──────────────────────────────────
+print("\n[2/5] Index reference returns...")
+idx_1m = idx_3m = idx_6m = idx_4w = 0
 try:
-    idx_1m = pct_ret(nifty_close, 4)
-    idx_3m = pct_ret(nifty_close, 13)
-    idx_6m = pct_ret(nifty_close, 26)
-    idx_4w = pct_ret(nifty_close, 4)
-    print(f"  1M: {idx_1m:.1f}%  3M: {idx_3m:.1f}%  6M: {idx_6m:.1f}%")
+    if nifty_close is not None:
+        idx_1m = pct_ret(nifty_close, 4)  or 0
+        idx_3m = pct_ret(nifty_close, 13) or 0
+        idx_6m = pct_ret(nifty_close, 26) or 0
+        idx_4w = idx_1m
+        print(f"  1M: {idx_1m:.1f}%  3M: {idx_3m:.1f}%  6M: {idx_6m:.1f}%")
 except Exception:
-    idx_1m = idx_3m = idx_6m = idx_4w = 0
+    pass
 
-print("\n[3/6] Sector metrics...")
-
+# ── Sector metrics ───────────────────────────────────────────
+print("\n[3/5] Sector metrics...")
 sec_bucket = {}
 for ticker in nifty500:
     df = price_data.get(ticker)
     if df is None or len(df) < 60:
         continue
     try:
-        close   = df["Close"].squeeze()
-        sma20   = close.rolling(20).mean().iloc[-1]
-        r4w     = pct_ret(close, 4)
-        r6m     = pct_ret(close, 26)
-        ab20    = close.iloc[-1] > sma20
-        sec     = sector_lookup.get(ticker, "Unknown")
+        close  = df["Close"].squeeze()
+        sma20  = close.rolling(20).mean().iloc[-1]
+        r4w    = pct_ret(close, 4)
+        r6m    = pct_ret(close, 26)
+        ab20   = close.iloc[-1] > sma20
+        sec    = sector_lookup.get(ticker, "Unknown")
         sec_bucket.setdefault(sec, []).append({"r4w": r4w, "r6m": r6m, "ab20": ab20})
     except Exception:
         pass
@@ -442,14 +463,14 @@ sector_vs_idx   = {}
 sector_strength = {}
 
 for sec, items in sec_bucket.items():
-    r4  = [x["r4w"] for x in items if x["r4w"] is not None]
-    r6  = [x["r6m"] for x in items if x["r6m"] is not None]
-    ab  = [x["ab20"] for x in items]
+    r4    = [x["r4w"] for x in items if x["r4w"] is not None]
+    r6    = [x["r6m"] for x in items if x["r6m"] is not None]
+    ab    = [x["ab20"] for x in items]
     med4w = np.median(r4) if r4 else 0
     med6m = np.median(r6) if r6 else 0
     brd   = (sum(ab) / len(ab) * 100) if ab else 0
     sector_stats[sec]  = {"4w": med4w, "6m": med6m, "breadth": brd}
-    sector_vs_idx[sec] = med4w - (idx_4w or 0)
+    sector_vs_idx[sec] = med4w - idx_4w
 
 sorted_secs = sorted(sector_stats.items(), key=lambda x: x[1]["4w"], reverse=True)
 for rank, (sec, _) in enumerate(sorted_secs):
@@ -466,9 +487,10 @@ def get_sector_cap(sec, score):
 
 print(f"  Sector metrics built for {len(sector_stats)} sectors")
 
-print("\n[4/6] Scoring stocks...")
+# ── Score all 500 stocks ─────────────────────────────────────
+print("\n[4/5] Scoring stocks...")
 
-rows_entry = []; rows_watch = []
+momentum_rows = []   # ALL stocks go here
 
 for ticker in nifty500:
     df   = price_data.get(ticker)
@@ -487,23 +509,65 @@ for ticker in nifty500:
         sector  = sector_lookup.get(ticker, "Unknown")
         is_cycl = sector in CYCLICAL_NSE
 
-        avg_vol20   = volume.iloc[-21:-1].mean()
-        traded_cr   = (price * avg_vol20) / 1e7
+        # ── Liquidity filter ─────────────────────────────────
+        avg_vol20 = volume.iloc[-21:-1].mean()
+        traded_cr = (price * avg_vol20) / 1e7
         if traded_cr < LIQ_HARD:
+            # Still record the stock but with zero score / "Filtered" label
+            # so "all 500 stocks" requirement is met
+            momentum_rows.append({
+                "week":          WEEK_TAG,
+                "ticker":        ticker,
+                "company":       company_lookup.get(ticker, ticker),
+                "sector":        sector_lookup.get(ticker, "Unknown"),
+                "price":         fmt(price, 2),
+                "score":         0,
+                "label":         "Filtered (Low Liq)",
+                "RSI":           "—",
+                "rs_periods":    "—",
+                "earn_gr":       "—",
+                "pct_from_high": "—",
+                "vol_ratio":     "—",
+                "atr_exp":       "—",
+                "pillar_a":      0,
+                "pillar_b":      0,
+                "pillar_c":      0,
+                "pillar_d":      0,
+            })
             continue
-        liq_flag = "thin" if traded_cr < LIQ_THIN else "ok"
 
-        t_eps    = safe_get(info, "trailingEps",    None)
-        f_eps    = safe_get(info, "forwardEps",     None)
-        earn_gr  = safe_get(info, "earningsGrowth", 0)
-        pe       = safe_get(info, "trailingPE",     999)
+        # ── Earnings / fundamentals ──────────────────────────
+        t_eps   = safe_get(info, "trailingEps",    None)
+        f_eps   = safe_get(info, "forwardEps",     None)
+        earn_gr = safe_get(info, "earningsGrowth", 0)
+        pe      = safe_get(info, "trailingPE",     999)
         if earn_gr and abs(earn_gr) < 5:
             earn_gr = earn_gr * 100
 
         if (t_eps is not None and t_eps < 0) and \
            (f_eps is not None and f_eps < 0):
+            momentum_rows.append({
+                "week":          WEEK_TAG,
+                "ticker":        ticker,
+                "company":       company,
+                "sector":        sector,
+                "price":         fmt(price, 2),
+                "score":         0,
+                "label":         "Filtered (Neg EPS)",
+                "RSI":           "—",
+                "rs_periods":    "—",
+                "earn_gr":       "—",
+                "pct_from_high": "—",
+                "vol_ratio":     "—",
+                "atr_exp":       "—",
+                "pillar_a":      0,
+                "pillar_b":      0,
+                "pillar_c":      0,
+                "pillar_d":      0,
+            })
             continue
 
+        # ── Quarterly financials ─────────────────────────────
         sales_gr = pat_gr = fwd_eps_gr = None
         if qfin is not None and not qfin.empty:
             for k in ["Total Revenue", "Revenue"]:
@@ -515,15 +579,15 @@ for ticker in nifty500:
         if t_eps and f_eps and t_eps > 0:
             fwd_eps_gr = ((f_eps - t_eps) / abs(t_eps)) * 100
 
+        # ── Price metrics ────────────────────────────────────
         high_52w      = high_s.iloc[-52:].max()
         high_10w      = high_s.iloc[-10:].max()
         pct_from_high = (high_52w - price) / high_52w * 100
-        if pct_from_high > DIST_HIGH_MAX:
-            continue
 
         sma20 = close.rolling(20).mean().iloc[-1]
         sma50 = close.rolling(50).mean().iloc[-1]
 
+        # ── RSI ──────────────────────────────────────────────
         rsi_s = ta.momentum.RSIIndicator(close, window=14).rsi()
         if rsi_s is None or rsi_s.dropna().shape[0] < 5:
             continue
@@ -541,9 +605,10 @@ for ticker in nifty500:
             if r_now >= 60 and r_prev < 60:
                 cross_week = w; rsi_at_cross = r_now; break
 
-        if cross_week is not None and rsi_at_cross > RSI_UPPER:
-            continue
+        if cross_week is not None and rsi_at_cross is not None and rsi_at_cross > RSI_UPPER:
+            cross_week = rsi_at_cross = None
 
+        # ── Volume ───────────────────────────────────────────
         vol_avg   = volume.iloc[-VOL_WINDOW-1:-1].mean()
         vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
 
@@ -554,24 +619,28 @@ for ticker in nifty500:
             else:
                 break
 
+        # ── ATR expansion ────────────────────────────────────
         atr_s = ta.volatility.AverageTrueRange(high_s, low_s, close, window=14).average_true_range()
         try:
             atr_exp = (atr_s.iloc[-1] / atr_s.iloc[-9] - 1) * 100
         except Exception:
             atr_exp = 0
 
-        r1m = pct_ret(close, 4);  rs1 = (r1m or 0) - (idx_1m or 0)
-        r3m = pct_ret(close, 13); rs3 = (r3m or 0) - (idx_3m or 0)
-        r6m = pct_ret(close, 26); rs6 = (r6m or 0) - (idx_6m or 0)
+        # ── Relative strength vs index ───────────────────────
+        r1m = pct_ret(close, 4);  rs1 = (r1m or 0) - idx_1m
+        r3m = pct_ret(close, 13); rs3 = (r3m or 0) - idx_3m
+        r6m = pct_ret(close, 26); rs6 = (r6m or 0) - idx_6m
         rs_periods = sum(1 for rs in [rs1, rs3, rs6] if rs > 0)
 
-        s_stats  = sector_stats.get(sector, {"4w":0,"6m":0,"breadth":0})
+        # ── Sector metrics ───────────────────────────────────
+        s_stats  = sector_stats.get(sector, {"4w": 0, "6m": 0, "breadth": 0})
         sec_4w   = s_stats["4w"]
         sec_6m   = s_stats["6m"]
         sec_brd  = s_stats["breadth"]
         sec_vs_i = sector_vs_idx.get(sector, 0)
         outperf  = (r6m or 0) - sec_6m
 
+        # ── is_watch flag (for label only) ───────────────────
         is_watch = (
             cross_week is None and
             50 <= rsi_now < 60 and
@@ -579,9 +648,7 @@ for ticker in nifty500:
             pct_from_high <= 15
         )
 
-        if cross_week is None and not is_watch:
-            continue
-
+        # ── PILLAR A: Price position + RS (max 40) ───────────
         a1 = 15 if pct_from_high<=5 else (10 if pct_from_high<=10 else 6)
         a2 = 10 if (price>sma20 and price>sma50) else (5 if price>sma20 else 0)
         a3 = 5  if outperf>10 else (3 if outperf>=5 else (1 if outperf>=0 else 0))
@@ -598,6 +665,7 @@ for ticker in nifty500:
             a5 += 3 if rs6 > 0 else 0
         pillar_a = a1+a2+a3+a4+a5
 
+        # ── PILLAR B: RSI signal + breakout (max 65) ─────────
         if cross_week is None:   b1 = 0
         elif cross_week == 0:    b1 = 30
         elif cross_week == 1:    b1 = 22
@@ -617,8 +685,8 @@ for ticker in nifty500:
         b4 += 4 if price > high_10w else 0
         b4 += 3 if vol_ratio >= 1.5 else 0
         try:
-            rng = df["High"].squeeze().iloc[-1] - df["Low"].squeeze().iloc[-1]
-            b4 += 3 if rng > 0 and (price - df["Low"].squeeze().iloc[-1])/rng >= 0.75 else 0
+            rng = high_s.iloc[-1] - low_s.iloc[-1]
+            b4 += 3 if rng > 0 and (price - low_s.iloc[-1])/rng >= 0.75 else 0
         except Exception:
             pass
 
@@ -627,11 +695,13 @@ for ticker in nifty500:
         b6 = 5 if atr_exp>=20 else (3 if atr_exp>=10 else 0)
         pillar_b = b1+b2+b3+b4+b5+b6
 
+        # ── PILLAR C: Sector strength (max 15) ───────────────
         c1 = 5 if sec_4w>=5 else (3 if sec_4w>=2 else (1 if sec_4w>=0 else 0))
         c2 = 5 if sec_vs_i>=3 else (3 if sec_vs_i>=1 else (1 if sec_vs_i>=0 else 0))
         c3 = 5 if sec_brd>=70 else (3 if sec_brd>=60 else (1 if sec_brd>=50 else 0))
         pillar_c = c1+c2+c3
 
+        # ── PILLAR D: Earnings / fundamentals (max 15) ───────
         d1 = 5 if (sales_gr and sales_gr>=25) else (3 if (sales_gr and sales_gr>=15)
              else (1 if (sales_gr and sales_gr>=5) else 0))
         d2 = 5 if (pat_gr and pat_gr>=30) else (3 if (pat_gr and pat_gr>=15)
@@ -643,111 +713,116 @@ for ticker in nifty500:
         raw   = pillar_a + pillar_b + pillar_c + pillar_d
         total = round(round((raw / RAW_MAX) * 100) * regime_mult)
 
-        label = ("🔥 High Momentum"      if total >= 76 else
-                 "⚡ Momentum Candidate" if total >= 61 else
-                 "📈 Building Up"        if total >= 41 else
-                 "👀 Weak Signal")
+        # ── Label ────────────────────────────────────────────
+        if cross_week is not None:
+            label = ("🔥 High Momentum"      if total >= 76 else
+                     "⚡ Momentum Candidate" if total >= 61 else
+                     "📈 Building Up"        if total >= 41 else
+                     "👀 Weak Signal")
+        elif is_watch:
+            label = "👁️ Watch"
+        else:
+            label = "Below Threshold"
 
-        row = {
+        # ── earn_gr for sheet (use YoY qfin if available) ────
+        earn_gr_out = pat_gr if pat_gr is not None else earn_gr
+
+        # ── Append row (exact column spec) ───────────────────
+        momentum_rows.append({
+            "week":          WEEK_TAG,
             "ticker":        ticker,
             "company":       company,
             "sector":        sector,
-            "is_cyclical":   "✓" if is_cycl else "",
-            "price":         round(price, 2),
-            "pct_from_high": round(pct_from_high, 1),
-            "rsi":           round(rsi_now, 1),
-            "rsi_cross":     f"{cross_week}w ago" if cross_week is not None else "—",
-            "rsi_at_cross":  round(rsi_at_cross, 1) if rsi_at_cross else "—",
-            "vol_ratio":     round(vol_ratio, 2),
-            "vol_persist":   vol_persist,
+            "price":         fmt(price, 2),
+            "score":         total,
+            "label":         label,
+            "RSI":           fmt(rsi_now, 1),
             "rs_periods":    rs_periods,
-            "atr_exp_pct":   round(atr_exp, 1),
-            "sales_gr":      round(sales_gr, 1) if sales_gr is not None else "—",
-            "pat_gr":        round(pat_gr, 1) if pat_gr is not None else "—",
-            "fwd_eps_gr":    round(fwd_eps_gr, 1) if fwd_eps_gr is not None else "—",
-            "pe_ratio":      round(pe, 1) if pe not in (None, 999) else "—",
-            "traded_cr":     round(traded_cr, 1),
-            "liq_flag":      liq_flag,
-            "sec_breadth":   round(sec_brd, 1),
-            "regime":        regime,
+            "earn_gr":       fmt(earn_gr_out, 1) if earn_gr_out is not None else "—",
+            "pct_from_high": fmt(pct_from_high, 1),
+            "vol_ratio":     fmt(vol_ratio, 2),
+            "atr_exp":       fmt(atr_exp, 1),
             "pillar_a":      pillar_a,
             "pillar_b":      pillar_b,
             "pillar_c":      pillar_c,
             "pillar_d":      pillar_d,
-            "raw_score":     raw,
-            "total_score":   total,
-            "label":         label,
-        }
-
-        if cross_week is not None:
-            rows_entry.append(row)
-        elif is_watch:
-            rows_watch.append(row)
+        })
 
     except Exception:
         continue
 
-print("\n[5/6] Sector caps...")
+momentum_df = pd.DataFrame(momentum_rows) if momentum_rows else pd.DataFrame(columns=[
+    "week","ticker","company","sector","price","score","label",
+    "RSI","rs_periods","earn_gr","pct_from_high","vol_ratio","atr_exp",
+    "pillar_a","pillar_b","pillar_c","pillar_d"
+])
 
-def apply_sector_cap(rows):
-    df_  = pd.DataFrame(rows).sort_values("total_score", ascending=False)
-    sec_count = {}; kept = []; overflow = []
-    for _, r in df_.iterrows():
-        sec = r["sector"]
-        cap = get_sector_cap(sec, r["total_score"])
-        cnt = sec_count.get(sec, 0)
-        if cnt < cap:
-            kept.append(r); sec_count[sec] = cnt + 1
-        else:
-            overflow.append(r)
-    return kept, overflow
-
-print("\n[6/6] Building output...")
-
-DCOLS = ["ticker","company","sector","is_cyclical","price","pct_from_high",
-         "rsi","rsi_cross","vol_ratio","vol_persist","rs_periods","atr_exp_pct",
-         "sales_gr","pat_gr","fwd_eps_gr","pe_ratio","traded_cr","liq_flag",
-         "sec_breadth","regime","pillar_a","pillar_b","pillar_c","pillar_d",
-         "total_score","label"]
-
-if not rows_entry:
-    print("⚠️  No momentum entry stocks found")
-    mom_entry = pd.DataFrame(columns=DCOLS)
-    mom_sector_overflow = pd.DataFrame(columns=DCOLS)
-else:
-    kept, overflow = apply_sector_cap(rows_entry)
-    mom_entry = (pd.DataFrame(kept).sort_values("total_score", ascending=False)
-                 .reset_index(drop=True) if kept else pd.DataFrame(columns=DCOLS))
-    mom_sector_overflow = (pd.DataFrame(overflow).sort_values("total_score", ascending=False)
-                           .reset_index(drop=True) if overflow else pd.DataFrame(columns=DCOLS))
-
-mom_watch = pd.DataFrame(rows_watch) if rows_watch else pd.DataFrame(columns=DCOLS)
-if not mom_watch.empty and "pillar_a" in mom_watch.columns:
-    mom_watch = (mom_watch[mom_watch["pillar_a"] >= WATCH_MIN_A]
-                 .sort_values(["pct_from_high","rsi"], ascending=[True,False])
-                 .reset_index(drop=True))
+# Derived views for Telegram summary
+mom_entry = momentum_df[momentum_df["label"].str.startswith(("🔥","⚡","📈"), na=False)].copy()
+mom_watch = momentum_df[momentum_df["label"] == "👁️ Watch"].copy()
 
 print(f"""
 {'='*65}
 MOMENTUM SCREENER | Regime: {regime}
 {'='*65}
-  mom_entry          : {len(mom_entry)} stocks
-  mom_watch          : {len(mom_watch)} stocks
-  mom_sector_overflow: {len(mom_sector_overflow)} stocks
+  Total rows built : {len(momentum_df)}
+  Entry candidates : {len(mom_entry)}
+  Watch list       : {len(mom_watch)}
 {'='*65}
 """)
 
 # ============================================================
-# CELL 6 — Export to Google Sheets (Service Account auth)
+# SECTION 6 — Export to Google Sheets (append rows)
 # ============================================================
 
-SHEET_NAME    = "Nifty500 Screener"
-MAX_SNAPSHOTS = 999
+print("\n[5/5] Exporting to Google Sheets...")
 
-CONTRA_COLS   = ["ticker", "company", "sector", "price", "total_score", "phase"]
-MOMENTUM_COLS = ["ticker", "company", "sector", "is_cyclical", "price", "total_score", "label"]
-CONTRA_TABS   = {"P2 Entry", "P1 Watch", "All Contra"}
-MOMENTUM_TABS = {"Mom Entry", "Mom Watch", "Sec Overflow"}
+SHEET_NAME = "Nifty500 Screener"
+
+# Exact column order per spec
+CONTRA_COLS  = ["week","ticker","company","sector","price",
+                "score","phase","RSI","drawdown","de_ratio",
+                "cross_week","vol_ratio","promoter","sales_gr",
+                "pat_gr","pillar_a","pillar_b"]
+
+MOMENTUM_COLS = ["week","ticker","company","sector","price",
+                 "score","label","RSI","rs_periods","earn_gr",
+                 "pct_from_high","vol_ratio","atr_exp",
+                 "pillar_a","pillar_b","pillar_c","pillar_d"]
+
+def ensure_worksheet(sh, name, rows=2000, cols=25):
+    """Get existing worksheet or create it with a header row."""
+    try:
+        return sh.worksheet(name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=name, rows=rows, cols=cols)
+        return ws
+
+def append_to_sheet(ws, df, cols):
+    """
+    Append df rows to ws.
+    - If sheet is empty (no data rows), write header first then data.
+    - If sheet already has data, append only data rows.
+    """
+    available = [c for c in cols if c in df.columns]
+    df_out    = df[available].copy().fillna("").astype(str)
+    data_rows = df_out.values.tolist()
+
+    # Check whether the sheet already has a header
+    existing  = ws.get_all_values()
+    has_header = len(existing) > 0 and len(existing[0]) > 0
+
+    if not has_header:
+        # Write header + data starting at A1
+        ws.update(values=[available] + data_rows, range_name="A1")
+        print(f"   ✅ '{ws.title}' — header + {len(data_rows)} rows written")
+    else:
+        # Append data below last row
+        next_row = len(existing) + 1
+        if data_rows:
+            ws.update(values=data_rows,
+                      range_name=f"A{next_row}")
+        print(f"   ✅ '{ws.title}' — {len(data_rows)} rows appended (sheet now {next_row + len(data_rows) - 1} rows)")
 
 try:
     gc = get_gspread_client()
@@ -759,117 +834,50 @@ try:
         sh = gc.create(SHEET_NAME)
         print(f"📄 Created new: {SHEET_NAME}")
 
-    timestamp = datetime.now().strftime("%d %b %Y %H:%M")
-    _iso = datetime.now().isocalendar()
-    date_tag  = f"{_iso.year}-W{_iso.week:02d}"
+    # ── Contra Data ───────────────────────────────────────────
+    ws_contra = ensure_worksheet(sh, "Contra Data", rows=60000, cols=20)
+    append_to_sheet(ws_contra, contra_df, CONTRA_COLS)
 
-    TAB_GROUPS = [
-        ("P2 Entry",     p2_final),
-        ("P1 Watch",     p1_final),
-        ("All Contra",   master_df),
-        ("Mom Entry",    mom_entry),
-        ("Mom Watch",    mom_watch),
-        ("Sec Overflow", mom_sector_overflow),
-    ]
+    # ── Momentum Data ─────────────────────────────────────────
+    ws_mom = ensure_worksheet(sh, "Momentum Data", rows=60000, cols=20)
+    append_to_sheet(ws_mom, momentum_df, MOMENTUM_COLS)
 
-    def write_tab(spreadsheet, tab_name, df, base_name):
-        if base_name in MOMENTUM_TABS:
-            show_cols = MOMENTUM_COLS
-        else:
-            show_cols = CONTRA_COLS
-
-        df = df.copy()
-        df.insert(0, "week", date_tag)
-        show_cols = ["week"] + show_cols
-        available = [c for c in show_cols if c in df.columns]
-        df_out    = df[available].copy().fillna("").astype(str)
-        data      = [df_out.columns.tolist()] + df_out.values.tolist()
-
-        try:
-            spreadsheet.del_worksheet(spreadsheet.worksheet(tab_name))
-        except gspread.WorksheetNotFound:
-            pass
-
-        ws = spreadsheet.add_worksheet(
-            title=tab_name,
-            rows=max(len(df_out) + 10, 50),
-            cols=len(available) + 2
-        )
-        ws.update(values=[[f"Updated: {timestamp} | {len(df_out)} stocks"]], range_name="A1")
-        ws.update(values=data, range_name="A3")
-        ws.format(f"A3:{chr(64 + len(available))}3", {
-            "backgroundColor": {"red": 0.13, "green": 0.13, "blue": 0.23},
-            "textFormat": {
-                "bold": True,
-                "foregroundColor": {"red": 1, "green": 1, "blue": 1}
-            },
-            "horizontalAlignment": "CENTER"
-        })
-        ws.freeze(rows=3)
-        print(f"   📊 '{tab_name}' → {len(df_out)} rows")
-
-    print(f"\n📝 Writing snapshot [{date_tag}]...")
-    for base_name, df in TAB_GROUPS:
-        if df is not None and not df.empty:
-            write_tab(sh, f"{base_name} [{date_tag}]", df, base_name)
-
-    print(f"\n🧹 Pruning old snapshots (keeping last {MAX_SNAPSHOTS})...")
-
-    all_tabs      = sh.worksheets()
-    tab_titles    = [ws.title for ws in all_tabs]
-    date_pattern  = re.compile(r"\[(\d{4}-W\d{2})\]")
-
-    found_dates = sorted(set(
-        m.group(1)
-        for t in tab_titles
-        for m in [date_pattern.search(t)] if m
-    ), key=lambda d: d)
-
-    dates_to_delete = found_dates[:-MAX_SNAPSHOTS] if len(found_dates) > MAX_SNAPSHOTS else []
-
-    deleted = 0
-    for ws in all_tabs:
-        m = date_pattern.search(ws.title)
-        if m and m.group(1) in dates_to_delete:
-            sh.del_worksheet(ws)
-            print(f"   🗑️  Deleted: {ws.title}")
-            deleted += 1
-
-    if deleted == 0:
-        print(f"   ✅ Nothing to prune")
-
-    retained = [d for d in found_dates if d not in dates_to_delete]
+    # Sheets "Contra Entry", "Mom Entry", "Dashboard" are managed
+    # separately by user — Scanner does NOT touch them.
 
     print(f"""
 {'='*55}
-✅ EXPORT COMPLETE — {timestamp}
+✅ EXPORT COMPLETE — {TIMESTAMP}
 {'='*55}
-Sheet     : {SHEET_NAME}
-Snapshot  : {date_tag}
-Retained  : {retained}
+Sheet    : {SHEET_NAME}
+Week tag : {WEEK_TAG}
 
-Contra:
-  P2 Entry     : {len(p2_final)} stocks
-  P1 Watch     : {len(p1_final)} stocks
-  All Contra   : {len(master_df)} stocks
+Contra Data  : {len(contra_df)} rows appended
+  Phase 2    : {len(p2_df)}
+  Phase 1    : {len(p1_df)}
 
-Momentum:
-  Mom Entry    : {len(mom_entry)} stocks
-  Mom Watch    : {len(mom_watch)} stocks
-  Sec Overflow : {len(mom_sector_overflow)} stocks
+Momentum Data: {len(momentum_df)} rows appended
+  Entry      : {len(mom_entry)}
+  Watch      : {len(mom_watch)}
+  Regime     : {regime}
 {'='*55}
 """)
     print(f"🔗 Link: {sh.url}")
 
     # ── Telegram Summary ──────────────────────────────────────
-    p2_top = p2_final.head(5)[["ticker","total_score"]].to_string(index=False) if not p2_final.empty else "None"
-    mom_top = mom_entry.head(5)[["ticker","total_score","label"]].to_string(index=False) if not mom_entry.empty else "None"
+    p2_top  = (p2_df.sort_values("score", ascending=False)
+               .head(5)[["ticker","score"]].to_string(index=False)
+               if not p2_df.empty else "None")
+    mom_top = (mom_entry.sort_values("score", ascending=False)
+               .head(5)[["ticker","score","label"]].to_string(index=False)
+               if not mom_entry.empty else "None")
 
-    tg_msg = f"""📊 <b>Nifty 500 Screener — {date_tag}</b>
+    tg_msg = f"""📊 <b>Nifty 500 Screener — {WEEK_TAG}</b>
 
 <b>CONTRA:</b>
-  P2 Entry Ready : {len(p2_final)}
-  P1 Watchlist   : {len(p1_final)}
+  Phase 2 Entry Ready : {len(p2_df)}
+  Phase 1 Watchlist   : {len(p1_df)}
+  Total screened      : {len(contra_df)}
 
 Top P2:
 <pre>{p2_top}</pre>
@@ -877,14 +885,17 @@ Top P2:
 <b>MOMENTUM ({regime}):</b>
   Entry  : {len(mom_entry)}
   Watch  : {len(mom_watch)}
+  Total  : {len(momentum_df)}
 
-Top Entry:
+Top Momentum:
 <pre>{mom_top}</pre>
 
-🔗 <a href="{sh.url}">Google Sheet kholo</a>"""
+🔗 Sheet updated ✅"""
 
     send_telegram(tg_msg)
 
 except Exception as e:
-    print(f"❌ Export failed: {e}")
-    send_telegram(f"❌ Screener FAILED on {datetime.now().strftime('%d %b %Y')}\nError: {e}")
+    err_msg = f"❌ Export failed: {e}"
+    print(err_msg)
+    import traceback; traceback.print_exc()
+    send_telegram(f"❌ Screener FAILED on {TIMESTAMP}\nError: {e}")
