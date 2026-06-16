@@ -865,32 +865,69 @@ Momentum Data: {len(momentum_df)} rows appended
     print(f"🔗 Link: {sh.url}")
 
     # ── Telegram Summary ──────────────────────────────────────
-    p2_top  = (p2_df.sort_values("score", ascending=False)
-               .head(5)[["ticker","score"]].to_string(index=False)
-               if not p2_df.empty else "None")
-    mom_top = (mom_entry.sort_values("score", ascending=False)
-               .head(5)[["ticker","score","label"]].to_string(index=False)
-               if not mom_entry.empty else "None")
 
-    tg_msg = f"""📊 <b>Nifty 500 Screener — {WEEK_TAG}</b>
+    # Market condition block
+    try:
+        n_rsi_val  = round(float(n_rsi), 1)
+        n_sma_diff = round(((float(n_price) / float(n_sma30)) - 1) * 100, 1)
+        mkt_icon   = "🔴" if regime == "Risk-Off" else "🟢"
+        mkt_line   = (
+            f"{mkt_icon} <b>Market:</b> {regime} | "
+            f"Nifty500 RSI {n_rsi_val} | "
+            f"{'Below' if n_sma_diff < 0 else 'Above'} 30W SMA "
+            f"({'+' if n_sma_diff >= 0 else ''}{n_sma_diff}%)\n"
+            f"   1M: {idx_1m:+.1f}%  3M: {idx_3m:+.1f}%  6M: {idx_6m:+.1f}%"
+        )
+    except Exception:
+        mkt_line = f"{'🔴' if regime == 'Risk-Off' else '🟢'} <b>Market:</b> {regime}"
 
-<b>CONTRA:</b>
-  Phase 2 Entry Ready : {len(p2_df)}
-  Phase 1 Watchlist   : {len(p1_df)}
-  Total screened      : {len(contra_df)}
+    # Top 5 Contra — Phase 2 names only (ticker + score)
+    def fmt_top5_contra(df):
+        top = df.sort_values("score", ascending=False).head(5)
+        if top.empty:
+            return "  —"
+        lines = []
+        for _, r in top.iterrows():
+            sym = str(r["ticker"]).replace(".NS", "")
+            lines.append(f"  {sym:<14} {r['score']}")
+        return "\n".join(lines)
 
-Top P2:
-<pre>{p2_top}</pre>
+    # Top 5 Momentum — ticker + score + short label
+    def fmt_top5_mom(df):
+        top = df.sort_values("score", ascending=False).head(5)
+        if top.empty:
+            return "  —"
+        lines = []
+        for _, r in top.iterrows():
+            sym   = str(r["ticker"]).replace(".NS", "")
+            label = str(r["label"]).replace("🔥 ","🔥").replace("⚡ ","⚡").replace("📈 ","📈")
+            lines.append(f"  {sym:<14} {r['score']}  {label}")
+        return "\n".join(lines)
 
-<b>MOMENTUM ({regime}):</b>
-  Entry  : {len(mom_entry)}
-  Watch  : {len(mom_watch)}
-  Total  : {len(momentum_df)}
+    p2_block  = fmt_top5_contra(p2_df)
+    mom_block = fmt_top5_mom(mom_entry)
 
-Top Momentum:
-<pre>{mom_top}</pre>
-
-🔗 Sheet updated ✅"""
+    tg_msg = (
+        f"📊 <b>Nifty 500 Screener — {WEEK_TAG}</b>\n"
+        f"🕐 {TIMESTAMP}\n\n"
+        f"{mkt_line}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔵 <b>CONTRA</b>\n"
+        f"  Phase 2 Entry Ready : <b>{len(p2_df)}</b>\n"
+        f"  Phase 1 Watchlist   : {len(p1_df)}\n"
+        f"  Total screened      : {len(contra_df)}\n\n"
+        f"<b>Top 5 Phase 2:</b>\n"
+        f"<pre>{p2_block}</pre>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🟠 <b>MOMENTUM</b>\n"
+        f"  Entry candidates : <b>{len(mom_entry)}</b>\n"
+        f"  Watch list       : {len(mom_watch)}\n"
+        f"  Total screened   : {len(momentum_df)}\n\n"
+        f"<b>Top 5 Entry:</b>\n"
+        f"<pre>{mom_block}</pre>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f'🔗 <a href="{sh.url}">Open Google Sheet</a>'
+    )
 
     send_telegram(tg_msg)
 
