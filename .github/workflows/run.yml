@@ -24,9 +24,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/nifty500_cache
-          key: nifty500-${{ steps.date.outputs.week }}
-          restore-keys: |
-            nifty500-
+          key: nifty500-v2-${{ steps.date.outputs.week }}
 
       - name: Install dependencies
         run: pip install yfinance pandas numpy ta requests gspread google-auth pytz
