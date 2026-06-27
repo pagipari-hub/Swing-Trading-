@@ -115,12 +115,71 @@ FUND_FILE     = os.path.join(CACHE_DIR, "fund_data.pkl")
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-def load_or_build(filepath, build_fn, label):
+def validate_price_data(data, label="price_data"):
+    """
+    Sanity-check cached price data before trusting it.
+
+    Returns True if the data looks usable, False if it looks broken
+    (e.g. a corrupted/partial cache inherited from a prior failed run).
+
+    Checks a small sample of known-liquid, always-listed tickers. If
+    those come back empty/NaN/zero, the whole cache is treated as
+    suspect and gets rebuilt from scratch instead of silently used.
+    """
+    sentinel_tickers = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS"]
+    present = [t for t in sentinel_tickers if t in data]
+
+    if not present:
+        print(f"  ⚠️  {label} validation: none of the sentinel tickers found at all")
+        return False
+
+    good = 0
+    for t in present:
+        df = data.get(t)
+        try:
+            if df is None or len(df) < 50:
+                continue
+            close = df["Close"].squeeze()
+            if close.dropna().empty:
+                continue
+            last_price = close.dropna().iloc[-1]
+            if last_price is None or last_price != last_price:  # NaN check
+                continue
+            if last_price <= 0:
+                continue
+            good += 1
+        except Exception:
+            continue
+
+    ok = good >= max(1, len(present) // 2)  # at least half of sentinels must be valid
+    if not ok:
+        print(f"  ⚠️  {label} validation FAILED: only {good}/{len(present)} sentinel "
+              f"tickers had usable price data. Treating cache as corrupted.")
+    else:
+        print(f"  ✅ {label} validation passed: {good}/{len(present)} sentinel tickers OK")
+    return ok
+
+
+def load_or_build(filepath, build_fn, label, validate_fn=None):
+    """
+    Load from cache if it exists AND (when a validator is given) passes
+    validation. Otherwise rebuild from scratch and overwrite the cache file.
+    """
     if os.path.exists(filepath):
         with open(filepath, "rb") as f:
             data = pickle.load(f)
-        print(f"✅ {label} loaded from cache — {len(data)} tickers")
-        return data
+
+        if validate_fn is None or validate_fn(data, label):
+            print(f"✅ {label} loaded from cache — {len(data)} tickers")
+            return data
+        else:
+            print(f"🗑️  {label} cache rejected as invalid — forcing rebuild...")
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            # fall through to rebuild below
+
     print(f"📥 Building {label}...")
     data = build_fn()
     with open(filepath, "wb") as f:
@@ -175,8 +234,13 @@ def build_q_fin_data():
     print(f"  ⚠️  QFin errors: {len(errors)}")
     return data
 
-price_data = load_or_build(PRICE_FILE, build_price_data, "price_data")
-fund_data  = load_or_build(FUND_FILE,  build_fund_data,  "fund_data")
+price_data = load_or_build(
+    PRICE_FILE, build_price_data, "price_data",
+    validate_fn=validate_price_data,
+)
+fund_data = load_or_build(
+    FUND_FILE, build_fund_data, "fund_data",
+)
 
 print(f"\n📥 Building q_fin_data (always fresh)...")
 q_fin_data = build_q_fin_data()
