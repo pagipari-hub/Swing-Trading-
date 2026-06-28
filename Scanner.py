@@ -452,8 +452,14 @@ DIST_HIGH_MAX = 20
 LIQ_HARD      = 10
 LIQ_THIN      = 20
 VOL_WINDOW    = 13
-RAW_MAX       = 120
+RAW_MAX       = 113    # corrected: Pillar A(50) + B(35) + C(15) + D(13) = 113
 WATCH_MIN_A   = 20
+
+# ── Fundamental floor thresholds (disqualifiers, applied after scoring) ──
+FLOOR_SALES_GR_MIN   = -15   # disqualify if revenue YoY <= this
+FLOOR_PAT_GR_MIN     = -25   # disqualify if profit YoY <= this
+FLOOR_DE_RATIO_MAX   = 150   # disqualify if debt/equity > this
+FLOOR_PROMOTER_MIN   = 20    # disqualify if promoter holding < this (when available)
 
 CYCLICAL_NSE = {
     "Metals & Mining", "Oil Gas & Consumable Fuels",
@@ -592,7 +598,8 @@ for ticker in nifty500:
                 "earn_gr":       "—",
                 "pct_from_high": "—",
                 "vol_ratio":     "—",
-                "atr_exp":       "—",
+                "new_52w_high":  "—",
+                "new_5y_high":   "—",
                 "pillar_a":      0,
                 "pillar_b":      0,
                 "pillar_c":      0,
@@ -623,7 +630,8 @@ for ticker in nifty500:
                 "earn_gr":       "—",
                 "pct_from_high": "—",
                 "vol_ratio":     "—",
-                "atr_exp":       "—",
+                "new_52w_high":  "—",
+                "new_5y_high":   "—",
                 "pillar_a":      0,
                 "pillar_b":      0,
                 "pillar_c":      0,
@@ -644,12 +652,24 @@ for ticker in nifty500:
             fwd_eps_gr = ((f_eps - t_eps) / abs(t_eps)) * 100
 
         # ── Price metrics ────────────────────────────────────
-        high_52w      = high_s.iloc[-52:].max()
-        high_10w      = high_s.iloc[-10:].max()
-        pct_from_high = (high_52w - price) / high_52w * 100
+        # New-high checks use CLOSE vs prior CLOSES (not High vs prior
+        # Highs) — consistent with every other metric in this script
+        # (RSI, SMAs, RS all run on Close), and avoids comparing this
+        # week's close against prior weeks' intraweek highs, which are
+        # structurally always >= their own close and would make a
+        # genuine new high look like it never happened.
+        close_52w_prior = close.iloc[-53:-1].max() if len(close) >= 53 else close.iloc[:-1].max()
+        close_5y_prior  = close.iloc[:-1].max()    # all available history, excluding current bar
+
+        high_52w       = high_s.iloc[-52:].max()   # kept for pct_from_high (inclusive, as before)
+        pct_from_high  = (high_52w - price) / high_52w * 100
+
+        is_new_52w_high = price >= close_52w_prior
+        is_new_5y_high  = price >= close_5y_prior
 
         sma20 = close.rolling(20).mean().iloc[-1]
         sma50 = close.rolling(50).mean().iloc[-1]
+        sma20_prev3 = close.rolling(20).mean().iloc[-4]  # 3 weeks ago, for "rising" check
 
         # ── RSI ──────────────────────────────────────────────
         rsi_s = ta.momentum.RSIIndicator(close, window=14).rsi()
@@ -676,19 +696,19 @@ for ticker in nifty500:
         vol_avg   = volume.iloc[-VOL_WINDOW-1:-1].mean()
         vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
 
-        vol_persist = 0
-        for w in range(1, 5):
-            if volume.iloc[-(w+1)] > vol_avg:
-                vol_persist += 1
-            else:
-                break
+        # Volume persistence — REWORKED: weeks above average out of
+        # last 5 (not a consecutive streak). Sustained accumulation
+        # shows up even with one quiet week mixed in.
+        vol_weeks_above = 0
+        for w in range(5):
+            try:
+                if volume.iloc[-(w+1)] > vol_avg:
+                    vol_weeks_above += 1
+            except Exception:
+                pass
 
-        # ── ATR expansion ────────────────────────────────────
-        atr_s = ta.volatility.AverageTrueRange(high_s, low_s, close, window=14).average_true_range()
-        try:
-            atr_exp = (atr_s.iloc[-1] / atr_s.iloc[-9] - 1) * 100
-        except Exception:
-            atr_exp = 0
+        # ── ATR expansion — REMOVED per redesign. Points redistributed
+        # into Relative Strength (Pillar A) and Trend Quality (Pillar B).
 
         # ── Relative strength vs index ───────────────────────
         r1m = pct_ret(close, 4);  rs1 = (r1m or 0) - idx_1m
@@ -704,85 +724,131 @@ for ticker in nifty500:
         sec_vs_i = sector_vs_idx.get(sector, 0)
         outperf  = (r6m or 0) - sec_6m
 
-        # ── is_watch flag (for label only) ───────────────────
+        # ── is_watch / is_emerging flags (for label only) ────
         is_watch = (
             cross_week is None and
             50 <= rsi_now < 60 and
             price > sma20 and price > sma50 and
             pct_from_high <= 15
         )
+        is_emerging = (
+            cross_week is None and
+            52 <= rsi_now < 60 and
+            price > sma20 and price > sma50 and
+            pct_from_high <= 20 and
+            (rs1 > 0 or rs3 > 0)          # improving relative strength
+        )
 
-        # ── PILLAR A: Price position + RS (max 40) ───────────
-        a1 = 15 if pct_from_high<=5 else (10 if pct_from_high<=10 else 6)
-        a2 = 10 if (price>sma20 and price>sma50) else (5 if price>sma20 else 0)
-        a3 = 5  if outperf>10 else (3 if outperf>=5 else (1 if outperf>=0 else 0))
-        a4 = 0
-        if is_cycl:
-            a4 = 5 if (pe and pe < 40) else 0
-        else:
-            a4 += 3 if (earn_gr and earn_gr > 15) else 0
-            a4 += 2 if (pe and pe < 40) else 0
+        # ── FUNDAMENTAL FLOOR (disqualifier, applied below after
+        # scoring — same pattern as the liquidity/EPS filters above) ──
+        promoter_pct  = safe_get(info, "promoterHolding", None)
+        de_ratio_mom  = safe_get(info, "debtToEquity", None)
+        fails_floor = (
+            (sales_gr     is not None and sales_gr     <= FLOOR_SALES_GR_MIN) or
+            (pat_gr       is not None and pat_gr       <= FLOOR_PAT_GR_MIN)   or
+            (de_ratio_mom is not None and de_ratio_mom  >  FLOOR_DE_RATIO_MAX) or
+            (promoter_pct is not None and promoter_pct  <  FLOOR_PROMOTER_MIN)
+        )
+
+        # ──────────────────────────────────────────────────────
+        # PILLAR A: Price Position + Breakout + Relative Strength (max 50)
+        # ──────────────────────────────────────────────────────
+        # A1 — Distance from 52w high, graduated into 5 tiers
+        a1 = (12 if pct_from_high <= 5  else
+               9 if pct_from_high <= 10 else
+               6 if pct_from_high <= 15 else
+               3 if pct_from_high <= 20 else 0)
+
+        # A2 — 52-week high breakout bonus (stacks with A1)
+        a2 = 6 if is_new_52w_high else 0
+
+        # A3 — All-time (5y) high breakout bonus (stacks with A1 + A2)
+        a3 = 8 if is_new_5y_high else 0
+
+        # A4 — Trend structure (graduated, replaces old binary check)
+        a4 = (8 if (price > sma20 and sma20 > sma50) else
+              4 if price > sma20 else 0)
+
+        # A5 — Relative strength, reweighted toward 1-month (max 12)
         a5 = 0
-        if rs_periods >= 2:
-            a5 += 3 if rs1 > 0 else 0
-            a5 += 4 if rs3 > 0 else 0
-            a5 += 3 if rs6 > 0 else 0
-        pillar_a = a1+a2+a3+a4+a5
+        a5 += 6 if rs1 > 2 else (3 if rs1 > 0 else 0)
+        a5 += 4 if rs3 > 2 else (2 if rs3 > 0 else 0)
+        a5 += 2 if rs6 > 2 else (1 if rs6 > 0 else 0)
 
-        # ── PILLAR B: RSI signal + breakout (max 65) ─────────
-        if cross_week is None:   b1 = 0
-        elif cross_week == 0:    b1 = 30
-        elif cross_week == 1:    b1 = 22
-        elif cross_week == 2:    b1 = 15
-        else:                    b1 = 8
-        if b1 > 0 and rsi_slope_ok:
-            b1 = min(b1+5, 35)
+        # A6 — Earnings quality, graduated (replaces old binary a4)
+        a6 = (4 if (earn_gr and earn_gr > 20) else
+              2 if (earn_gr and earn_gr > 10) else
+              1 if (earn_gr and earn_gr > 0)  else 0)
 
-        b2 = 0
-        if rsi_at_cross is not None:
-            b2 = 10 if rsi_at_cross<=65 else (6 if rsi_at_cross<=70 else 3)
+        pillar_a = a1 + a2 + a3 + a4 + a5 + a6   # max 50
 
-        b3 = 10 if vol_ratio>=3 else (8 if vol_ratio>=2.5 else
-             (5 if vol_ratio>=2 else (2 if vol_ratio>=1.5 else 0)))
+        # ──────────────────────────────────────────────────────
+        # PILLAR B: RSI Signal + Trend Quality (max 35, ATR removed)
+        # ──────────────────────────────────────────────────────
+        # B1 — RSI cross quality: graduated by recency AND by how hot
+        # RSI already was at the moment of crossing (a late, hot cross
+        # has less room left to run than a fresh, cool one)
+        if cross_week is None:
+            b1 = 0
+        else:
+            hot = rsi_at_cross if rsi_at_cross is not None else 60
+            if cross_week == 0:
+                b1 = 20 if hot <= 65 else (14 if hot <= 70 else 8)
+            elif cross_week == 1:
+                b1 = 15 if hot <= 65 else (10 if hot <= 70 else 5)
+            else:  # cross_week == 2 or 3
+                b1 = 10 if hot <= 65 else (6 if hot <= 70 else 3)
 
-        b4 = 0
-        b4 += 4 if price > high_10w else 0
-        b4 += 3 if vol_ratio >= 1.5 else 0
-        try:
-            rng = high_s.iloc[-1] - low_s.iloc[-1]
-            b4 += 3 if rng > 0 and (price - low_s.iloc[-1])/rng >= 0.75 else 0
-        except Exception:
-            pass
+        # B2 — RSI slope confirmation
+        b2 = 5 if (b1 > 0 and rsi_slope_ok) else 0
 
-        b5 = 10 if vol_persist>=3 else (5 if vol_persist==2 else
-             (2 if vol_persist==1 else 0))
-        b6 = 5 if atr_exp>=20 else (3 if atr_exp>=10 else 0)
-        pillar_b = b1+b2+b3+b4+b5+b6
+        # B3 — Trend Quality (NEW): SMA structure + rising SMA + price
+        # above it. Rewards clean institutional trends over spikes.
+        tq_conditions = [
+            sma20 > sma50,
+            sma20 > sma20_prev3,         # 20w SMA rising over last 3 weeks
+            price > sma20,
+        ]
+        tq_count = sum(1 for c in tq_conditions if c)
+        b3 = 10 if tq_count == 3 else (5 if tq_count == 2 else 0)
 
-        # ── PILLAR C: Sector strength (max 15) ───────────────
+        pillar_b = b1 + b2 + b3   # max 35
+
+        # ──────────────────────────────────────────────────────
+        # PILLAR C: Sector strength (max 15) — UNCHANGED
+        # ──────────────────────────────────────────────────────
         c1 = 5 if sec_4w>=5 else (3 if sec_4w>=2 else (1 if sec_4w>=0 else 0))
         c2 = 5 if sec_vs_i>=3 else (3 if sec_vs_i>=1 else (1 if sec_vs_i>=0 else 0))
         c3 = 5 if sec_brd>=70 else (3 if sec_brd>=60 else (1 if sec_brd>=50 else 0))
         pillar_c = c1+c2+c3
 
-        # ── PILLAR D: Earnings / fundamentals (max 15) ───────
-        d1 = 5 if (sales_gr and sales_gr>=25) else (3 if (sales_gr and sales_gr>=15)
-             else (1 if (sales_gr and sales_gr>=5) else 0))
-        d2 = 5 if (pat_gr and pat_gr>=30) else (3 if (pat_gr and pat_gr>=15)
-             else (1 if (pat_gr and pat_gr>=5) else 0))
-        d3 = 5 if (fwd_eps_gr and fwd_eps_gr>=20) else (3 if (fwd_eps_gr and fwd_eps_gr>=10)
-             else (1 if (fwd_eps_gr and fwd_eps_gr>=0) else 0))
-        pillar_d = d1+d2+d3
+        # ──────────────────────────────────────────────────────
+        # PILLAR D: Volume (max 13) — reworked persistence, ATR's old
+        # points partly redistributed here (+2 on D2 vs old max)
+        # ──────────────────────────────────────────────────────
+        d1 = (5 if vol_ratio >= 3   else
+              3 if vol_ratio >= 2   else
+              1 if vol_ratio >= 1.5 else 0)
 
-        raw   = pillar_a + pillar_b + pillar_c + pillar_d
+        d2 = (8 if vol_weeks_above == 5 else
+              5 if vol_weeks_above == 4 else
+              3 if vol_weeks_above == 3 else 0)
+
+        pillar_d = d1 + d2   # max 13
+
+        raw   = pillar_a + pillar_b + pillar_c + pillar_d   # max 113
         total = round(round((raw / RAW_MAX) * 100) * regime_mult)
 
-        # ── Label ────────────────────────────────────────────
-        if cross_week is not None:
-            label = ("🔥 High Momentum"      if total >= 76 else
-                     "⚡ Momentum Candidate" if total >= 61 else
-                     "📈 Building Up"        if total >= 41 else
+        # ── Label (new tiers, includes 🟢 Emerging Momentum) ─
+        if fails_floor:
+            label = "Filtered (Weak Fundamentals)"
+            total = 0
+        elif cross_week is not None:
+            label = ("🔥 High Momentum"       if total >= 80 else
+                     "⚡ Momentum Candidate"  if total >= 65 else
                      "👀 Weak Signal")
+        elif is_emerging:
+            label = "🟢 Emerging Momentum"
         elif is_watch:
             label = "👁️ Watch"
         else:
@@ -805,7 +871,8 @@ for ticker in nifty500:
             "earn_gr":       fmt(earn_gr_out, 1) if earn_gr_out is not None else "—",
             "pct_from_high": fmt(pct_from_high, 1),
             "vol_ratio":     fmt(vol_ratio, 2),
-            "atr_exp":       fmt(atr_exp, 1),
+            "new_52w_high":  "Yes" if is_new_52w_high else "No",
+            "new_5y_high":   "Yes" if is_new_5y_high else "No",
             "pillar_a":      pillar_a,
             "pillar_b":      pillar_b,
             "pillar_c":      pillar_c,
@@ -817,21 +884,26 @@ for ticker in nifty500:
 
 momentum_df = pd.DataFrame(momentum_rows) if momentum_rows else pd.DataFrame(columns=[
     "week","ticker","company","sector","price","score","label",
-    "RSI","rs_periods","earn_gr","pct_from_high","vol_ratio","atr_exp",
+    "RSI","rs_periods","earn_gr","pct_from_high","vol_ratio",
+    "new_52w_high","new_5y_high",
     "pillar_a","pillar_b","pillar_c","pillar_d"
 ])
 
 # Derived views for Telegram summary
-mom_entry = momentum_df[momentum_df["label"].str.startswith(("🔥","⚡","📈"), na=False)].copy()
-mom_watch = momentum_df[momentum_df["label"] == "👁️ Watch"].copy()
+# Entry candidates = 🔥 and ⚡ ONLY (per design — "Emerging Momentum" is a
+# separate forward-looking tier, not counted as Entry)
+mom_entry    = momentum_df[momentum_df["label"].str.startswith(("🔥","⚡"), na=False)].copy()
+mom_emerging = momentum_df[momentum_df["label"] == "🟢 Emerging Momentum"].copy()
+mom_watch    = momentum_df[momentum_df["label"] == "👁️ Watch"].copy()
 
 print(f"""
 {'='*65}
 MOMENTUM SCREENER | Regime: {regime}
 {'='*65}
-  Total rows built : {len(momentum_df)}
-  Entry candidates : {len(mom_entry)}
-  Watch list       : {len(mom_watch)}
+  Total rows built   : {len(momentum_df)}
+  Entry candidates   : {len(mom_entry)}
+  Emerging Momentum  : {len(mom_emerging)}
+  Watch list         : {len(mom_watch)}
 {'='*65}
 """)
 
@@ -866,7 +938,7 @@ CONTRA_METRICS = [
 
 MOMENTUM_METRICS = [
     "price", "total_score", "label", "RSI", "rs_periods", "earn_gr",
-    "pct_from_high", "vol_ratio", "atr_exp",
+    "pct_from_high", "vol_ratio", "new_52w_high", "new_5y_high",
     "pillar_a", "pillar_b", "pillar_c", "pillar_d"
 ]
 
@@ -1033,6 +1105,7 @@ Contra Data  : {len(contra_df)} rows appended
 
 Momentum Data: {len(momentum_df)} rows appended
   Entry      : {len(mom_entry)}
+  Emerging   : {len(mom_emerging)}
   Watch      : {len(mom_watch)}
   Regime     : {regime}
 {'='*55}
@@ -1075,7 +1148,7 @@ Momentum Data: {len(momentum_df)} rows appended
         lines = []
         for _, r in top.iterrows():
             sym   = str(r["ticker"]).replace(".NS", "")
-            label = str(r["label"]).replace("🔥 ","🔥").replace("⚡ ","⚡").replace("📈 ","📈")
+            label = str(r["label"]).replace("🔥 ","🔥").replace("⚡ ","⚡").replace("🟢 ","🟢")
             lines.append(f"  {sym:<14} {r['score']}  {label}")
         return "\n".join(lines)
 
@@ -1096,6 +1169,7 @@ Momentum Data: {len(momentum_df)} rows appended
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🟠 <b>MOMENTUM</b>\n"
         f"  Entry candidates : <b>{len(mom_entry)}</b>\n"
+        f"  Emerging         : {len(mom_emerging)}\n"
         f"  Watch list       : {len(mom_watch)}\n"
         f"  Total screened   : {len(momentum_df)}\n\n"
         f"<b>Top 5 Entry:</b>\n"
