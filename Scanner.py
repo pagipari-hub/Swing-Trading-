@@ -292,12 +292,48 @@ def fmt(val, decimals=2, fallback="—"):
         return fallback
 
 # ============================================================
+# SECTION 3b — Shared sector drawdown stats (used by Contra's
+# sector-relative weakness scoring). Computed once, early, since
+# Contra runs before Momentum's own sector-strength block (which
+# measures RETURNS, a different purpose — kept separate from this).
+# ============================================================
+
+print("\n📊 Building sector drawdown baseline (for Contra)...")
+_sector_drawdowns = {}
+for _t in nifty500:
+    _df = price_data.get(_t)
+    if _df is None or len(_df) < 60:
+        continue
+    try:
+        _close = _df["Close"].squeeze()
+        _high  = _df["High"].squeeze()
+        _price = _close.iloc[-1]
+        _high_52w = _high.iloc[-52:].max()
+        _dd = (_high_52w - _price) / _high_52w * 100
+        _sec = sector_lookup.get(_t, "Unknown")
+        _sector_drawdowns.setdefault(_sec, []).append(_dd)
+    except Exception:
+        pass
+
+sector_median_drawdown = {
+    sec: float(np.median(vals)) for sec, vals in _sector_drawdowns.items() if vals
+}
+print(f"  Sector drawdown baseline built for {len(sector_median_drawdown)} sectors")
+
+# ============================================================
 # SECTION 4 — CONTRA SCREENER (all 500 stocks)
 # ============================================================
 
 print("\n" + "=" * 65)
 print("CONTRA SCREENER")
 print("=" * 65)
+
+# ── Fundamental gate thresholds (mirrors the original notebook's
+# pre-scoring disqualifier — a stock must pass ALL of these to be
+# scored at all, not just get a lower score) ──────────────────
+CONTRA_GATE_DE_MAX      = 150   # debt/equity must be <= this
+CONTRA_GATE_SALES_MIN   = -15   # revenue YoY must be > this (not falling >15%)
+CONTRA_GATE_PROMOTER_MIN = 20   # promoter holding must be >= this
 
 contra_rows = []   # will hold ALL stocks (500) for sheet export
 
@@ -310,6 +346,8 @@ for ticker in nifty500:
     try:
         close   = df["Close"].squeeze()
         volume  = df["Volume"].squeeze()
+        high_s  = df["High"].squeeze()
+        low_s   = df["Low"].squeeze()
         price   = close.iloc[-1]
         company = company_lookup.get(ticker, ticker)
         sector  = sector_lookup.get(ticker, "Unknown")
@@ -322,17 +360,38 @@ for ticker in nifty500:
         rsi     = rsi_s.iloc[-1]
         rsi_sm  = rsi_sma.iloc[-1]
 
-        # ── Volume ratio ──────────────────────────────────────
-        vol_avg   = volume.iloc[-14:-1].mean()
-        vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
+        # ── Volume ratio — THIS WEEK + PEAK over last 8 weeks ──
+        # A spike from a few weeks back still counts even if volume
+        # has since cooled off (change #5).
+        vol_avg        = volume.iloc[-14:-1].mean()
+        vol_ratio_now  = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
+        peak_vol_ratio = 0
+        for w in range(8):
+            try:
+                v = volume.iloc[-(w+1)] / vol_avg if vol_avg > 0 else 0
+                peak_vol_ratio = max(peak_vol_ratio, v)
+            except Exception:
+                pass
+        vol_ratio = max(vol_ratio_now, peak_vol_ratio)
 
-        # ── 52-week drawdown ─────────────────────────────────
-        high_52w = df["High"].squeeze().iloc[-52:].max()
+        # ── 52-week drawdown AND 52-week-low confirmation ────
+        high_52w = high_s.iloc[-52:].max()
+        low_52w  = low_s.iloc[-52:].min()
         drawdown = (high_52w - price) / high_52w * 100
+        pct_from_low = (price - low_52w) / low_52w * 100 if low_52w > 0 else 0
+        # "low_confirmed" — bounce sits in a healthy zone: already off
+        # the bottom (not still making fresh lows), but not so far off
+        # that the recovery has likely already run its course.
+        low_confirmed = 25 <= pct_from_low <= 60
 
         # ── Fundamentals ──────────────────────────────────────
-        promoter = safe_get(info, "promoterHolding", 0)
-        de_ratio = safe_get(info, "debtToEquity",    999)
+        # promoterHolding doesn't exist in yfinance's .info dict and
+        # always returns None — heldPercentInsiders is the correct
+        # field (change #2).
+        promoter = safe_get(info, "heldPercentInsiders", None)
+        if promoter is not None:
+            promoter = promoter * 100   # yfinance returns this as a fraction (0-1)
+        de_ratio = safe_get(info, "debtToEquity", 999)
 
         # ── Sales & PAT growth from quarterly financials ──────
         sales_gr = pat_gr = None
@@ -345,15 +404,78 @@ for ticker in nifty500:
                 if k in qfin.index:
                     pat_gr = yoy_growth(qfin.loc[k]); break
 
-        # ── Pillar A: Value / Fundamentals (max 40) ───────────
+        # ── Net income (for gate's profitability check) ──────
+        net_income_positive = None
+        if qfin is not None and not qfin.empty:
+            for k in ["Net Income", "Net Income Common Stockholders"]:
+                if k in qfin.index:
+                    try:
+                        latest_ni = qfin.loc[k].dropna().iloc[0]
+                        net_income_positive = latest_ni > 0
+                    except Exception:
+                        pass
+                    break
+
+        # ──────────────────────────────────────────────────────
+        # FUNDAMENTAL GATE (change #1) — disqualifies BEFORE scoring,
+        # same pattern Momentum uses for its own filters. Only checked
+        # when the relevant data is actually available; missing data
+        # does not disqualify (avoids punishing data gaps as failures).
+        # ──────────────────────────────────────────────────────
+        fails_gate = (
+            (net_income_positive is False) or
+            (de_ratio is not None and de_ratio != 999 and de_ratio > CONTRA_GATE_DE_MAX) or
+            (sales_gr is not None and sales_gr <= CONTRA_GATE_SALES_MIN) or
+            (promoter is not None and promoter < CONTRA_GATE_PROMOTER_MIN)
+        )
+
+        if fails_gate:
+            contra_rows.append({
+                "week":          WEEK_TAG,
+                "ticker":        ticker,
+                "company":       company,
+                "sector":        sector,
+                "price":         fmt(price, 2),
+                "score":         0,
+                "phase":         "Filtered (Weak Fundamentals)",
+                "RSI":           fmt(rsi, 1),
+                "drawdown":      fmt(drawdown, 1),
+                "de_ratio":      fmt(de_ratio, 2) if de_ratio != 999 else "—",
+                "cross_week":    "—",
+                "vol_ratio":     fmt(vol_ratio, 2),
+                "promoter":      fmt(promoter, 1) if promoter is not None else "—",
+                "sales_gr":      fmt(sales_gr, 1) if sales_gr is not None else "—",
+                "pat_gr":        fmt(pat_gr, 1)   if pat_gr   is not None else "—",
+                "pct_from_low":  fmt(pct_from_low, 1),
+                "low_confirmed": "—",
+                "pillar_a":      0,
+                "pillar_b":      0,
+            })
+            continue
+
+        # ── Sector-relative weakness (change #4) ──────────────
+        sec_median_dd = sector_median_drawdown.get(sector, drawdown)
+        relative_weakness = drawdown - sec_median_dd   # positive = fell MORE than sector
+
+        # ──────────────────────────────────────────────────────
+        # PILLAR A: Value / Fundamentals (max 50 — was 40, gained
+        # low-confirmation + sector-relative components)
+        # ──────────────────────────────────────────────────────
         a1 = (20 if drawdown >= 40 else
               15 if drawdown >= 30 else
               10 if drawdown >= 20 else 0)
-        a2 = (10 if (promoter and promoter >= 50) else
-               5 if (promoter and promoter >= 35) else 0)
-        a3 = (10 if (de_ratio and de_ratio < 0.5) else
-               5 if (de_ratio and de_ratio < 1.5) else 0)
-        pillar_a = a1 + a2 + a3
+        a2 = (10 if (promoter is not None and promoter >= 50) else
+               5 if (promoter is not None and promoter >= 35) else 0)
+        a3 = (10 if (de_ratio is not None and de_ratio != 999 and de_ratio < 0.5) else
+               5 if (de_ratio is not None and de_ratio != 999 and de_ratio < 1.5) else 0)
+        # A4 — 52-week-low confirmation bonus (change #3)
+        a4 = 5 if low_confirmed else 0
+        # A5 — sector-relative weakness bonus (change #4): rewards
+        # falling MORE than the sector median (idiosyncratic decline,
+        # not just systemic sector-wide drag)
+        a5 = (5 if relative_weakness >= 15 else
+              3 if relative_weakness >= 5  else 0)
+        pillar_a = a1 + a2 + a3 + a4 + a5   # max 50
 
         # ── RSI cross (within last 3 weeks) ──────────────────
         cross_week = None
@@ -366,7 +488,10 @@ for ticker in nifty500:
                 cross_week = w
                 break
 
-        # ── Pillar B: Momentum / Signal (max 60) ─────────────
+        # ── PILLAR B: Momentum / Signal (max 60) — UNCHANGED
+        # structure, only vol_ratio's INPUT changed (now includes
+        # peak-volume lookback from above)
+        # ──────────────────────────────────────────────────────
         if   cross_week == 0: b1 = 30
         elif cross_week == 1: b1 = 22
         elif cross_week == 2: b1 = 15
@@ -382,10 +507,11 @@ for ticker in nifty500:
         pillar_b = b1 + b2 + b3
         total    = pillar_a + pillar_b
 
-        # ── Phase label ───────────────────────────────────────
+        # ── Phase label — Phase 1 now REQUIRES low_confirmed
+        # (change #3), not just drawdown/RSI/volume conditions ──
         if cross_week is not None and total >= 50:
             phase = "Phase 2 - Entry Ready"
-        elif rsi < rsi_sm and drawdown >= 20 and vol_ratio >= 1.5:
+        elif rsi < rsi_sm and drawdown >= 20 and vol_ratio >= 1.5 and low_confirmed:
             phase = "Phase 1 - Watchlist"
         elif total >= 30:
             phase = "On Radar"
@@ -394,23 +520,25 @@ for ticker in nifty500:
 
         # ── Append row (exact column spec) ───────────────────
         contra_rows.append({
-            "week":       WEEK_TAG,
-            "ticker":     ticker,
-            "company":    company,
-            "sector":     sector,
-            "price":      fmt(price, 2),
-            "score":      total,
-            "phase":      phase,
-            "RSI":        fmt(rsi, 1),
-            "drawdown":   fmt(drawdown, 1),
-            "de_ratio":   fmt(de_ratio, 2) if de_ratio != 999 else "—",
-            "cross_week": cross_week if cross_week is not None else "—",
-            "vol_ratio":  fmt(vol_ratio, 2),
-            "promoter":   fmt(promoter, 1) if promoter else "—",
-            "sales_gr":   fmt(sales_gr, 1) if sales_gr is not None else "—",
-            "pat_gr":     fmt(pat_gr, 1)   if pat_gr   is not None else "—",
-            "pillar_a":   pillar_a,
-            "pillar_b":   pillar_b,
+            "week":          WEEK_TAG,
+            "ticker":        ticker,
+            "company":       company,
+            "sector":        sector,
+            "price":         fmt(price, 2),
+            "score":         total,
+            "phase":         phase,
+            "RSI":           fmt(rsi, 1),
+            "drawdown":      fmt(drawdown, 1),
+            "de_ratio":      fmt(de_ratio, 2) if de_ratio != 999 else "—",
+            "cross_week":    cross_week if cross_week is not None else "—",
+            "vol_ratio":     fmt(vol_ratio, 2),
+            "promoter":      fmt(promoter, 1) if promoter is not None else "—",
+            "sales_gr":      fmt(sales_gr, 1) if sales_gr is not None else "—",
+            "pat_gr":        fmt(pat_gr, 1)   if pat_gr   is not None else "—",
+            "pct_from_low":  fmt(pct_from_low, 1),
+            "low_confirmed": "Yes" if low_confirmed else "No",
+            "pillar_a":      pillar_a,
+            "pillar_b":      pillar_b,
         })
 
     except Exception:
@@ -419,7 +547,7 @@ for ticker in nifty500:
 contra_df = pd.DataFrame(contra_rows) if contra_rows else pd.DataFrame(columns=[
     "week","ticker","company","sector","price","score","phase",
     "RSI","drawdown","de_ratio","cross_week","vol_ratio","promoter",
-    "sales_gr","pat_gr","pillar_a","pillar_b"
+    "sales_gr","pat_gr","pct_from_low","low_confirmed","pillar_a","pillar_b"
 ])
 
 # Derived views (for Telegram summary only — not written to sheets)
@@ -933,7 +1061,7 @@ SHEET_NAME = "Nifty500 Screener"
 CONTRA_METRICS = [
     "price", "total_score", "phase", "RSI", "drawdown", "de_ratio",
     "cross_week", "vol_ratio", "promoter", "sales_gr", "pat_gr",
-    "pillar_a", "pillar_b"
+    "pct_from_low", "low_confirmed", "pillar_a", "pillar_b"
 ]
 
 MOMENTUM_METRICS = [
@@ -1129,9 +1257,9 @@ Momentum Data: {len(momentum_df)} rows appended
     except Exception:
         mkt_line = f"{'🔴' if regime == 'Risk-Off' else '🟢'} <b>Market:</b> {regime}"
 
-    # Top 5 Contra — Phase 2 names only (ticker + score)
-    def fmt_top5_contra(df):
-        top = df.sort_values("score", ascending=False).head(5)
+    # Top 10 Contra — Phase 2 only (ticker + score)
+    def fmt_top10_contra(df):
+        top = df.sort_values("score", ascending=False).head(10)
         if top.empty:
             return "  —"
         lines = []
@@ -1140,20 +1268,20 @@ Momentum Data: {len(momentum_df)} rows appended
             lines.append(f"  {sym:<14} {r['score']}")
         return "\n".join(lines)
 
-    # Top 5 Momentum — ticker + score + short label
-    def fmt_top5_mom(df):
-        top = df.sort_values("score", ascending=False).head(5)
+    # Top 10 Momentum — 🔥+⚡ only (ticker + score + label)
+    def fmt_top10_mom(df):
+        top = df.sort_values("score", ascending=False).head(10)
         if top.empty:
             return "  —"
         lines = []
         for _, r in top.iterrows():
             sym   = str(r["ticker"]).replace(".NS", "")
-            label = str(r["label"]).replace("🔥 ","🔥").replace("⚡ ","⚡").replace("🟢 ","🟢")
+            label = str(r["label"]).replace("🔥 ","🔥").replace("⚡ ","⚡")
             lines.append(f"  {sym:<14} {r['score']}  {label}")
         return "\n".join(lines)
 
-    p2_block  = fmt_top5_contra(p2_df)
-    mom_block = fmt_top5_mom(mom_entry)
+    p2_block  = fmt_top10_contra(p2_df)
+    mom_block = fmt_top10_mom(mom_entry)
 
     tg_msg = (
         f"📊 <b>Nifty 500 Screener — {WEEK_TAG}</b>\n"
@@ -1164,7 +1292,7 @@ Momentum Data: {len(momentum_df)} rows appended
         f"  Phase 2 Entry Ready : <b>{len(p2_df)}</b>\n"
         f"  Phase 1 Watchlist   : {len(p1_df)}\n"
         f"  Total screened      : {len(contra_df)}\n\n"
-        f"<b>Top 5 Phase 2:</b>\n"
+        f"<b>Top 10 Phase 2:</b>\n"
         f"<pre>{p2_block}</pre>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🟠 <b>MOMENTUM</b>\n"
@@ -1172,7 +1300,7 @@ Momentum Data: {len(momentum_df)} rows appended
         f"  Emerging         : {len(mom_emerging)}\n"
         f"  Watch list       : {len(mom_watch)}\n"
         f"  Total screened   : {len(momentum_df)}\n\n"
-        f"<b>Top 5 Entry:</b>\n"
+        f"<b>Top 10 Entry:</b>\n"
         f"<pre>{mom_block}</pre>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f'🔗 <a href="{sh.url}">Open Google Sheet</a>'
