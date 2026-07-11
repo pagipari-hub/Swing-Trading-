@@ -321,6 +321,44 @@ sector_median_drawdown = {
 print(f"  Sector drawdown baseline built for {len(sector_median_drawdown)} sectors")
 
 # ============================================================
+# SECTION 3c — Contra Regime (4-tier, matches Cell 9 backtest)
+# Standalone — does not affect or depend on Momentum's own
+# Risk-On/Risk-Off regime block in Section 5. Kept separate on
+# purpose so neither screener's regime logic can drift the other.
+# ============================================================
+
+print("\n📊 Building Contra regime (4-tier)...")
+
+CONTRA_NIFTY_INDEX = "^CRSLDX"
+contra_regime = "NEUTRAL"
+
+try:
+    _nf = price_data.get(CONTRA_NIFTY_INDEX)
+    if _nf is None:
+        _closes = [price_data[t]["Close"].squeeze()
+                   for t in nifty500
+                   if price_data.get(t) is not None and len(price_data[t]) > 60]
+        _contra_nifty_close = pd.concat(_closes, axis=1).median(axis=1)
+    else:
+        _contra_nifty_close = _nf["Close"].squeeze()
+
+    _contra_n_rsi = ta.momentum.RSIIndicator(_contra_nifty_close, window=14).rsi().iloc[-1]
+
+    if _contra_n_rsi >= 60:
+        contra_regime = "BULL"
+    elif _contra_n_rsi >= 45:
+        contra_regime = "NEUTRAL"
+    elif _contra_n_rsi >= 35:
+        contra_regime = "CAUTION"
+    else:
+        contra_regime = "BEAR"
+
+    print(f"  📍 Contra regime: {contra_regime} (Nifty500 RSI {_contra_n_rsi:.1f})")
+except Exception as e:
+    contra_regime = "NEUTRAL"
+    print(f"  ⚠️  Contra regime check failed ({e}) — defaulting to NEUTRAL")
+
+# ============================================================
 # SECTION 4 — CONTRA SCREENER (all 500 stocks)
 # ============================================================
 
@@ -450,6 +488,9 @@ for ticker in nifty500:
                 "low_confirmed": "—",
                 "pillar_a":      0,
                 "pillar_b":      0,
+                "quality_score":  0,
+                "quality_bucket": "—",
+                "archetype_a":    "No",
             })
             continue
 
@@ -478,7 +519,12 @@ for ticker in nifty500:
         pillar_a = a1 + a2 + a3 + a4 + a5   # max 50
 
         # ── RSI cross (within last 3 weeks) ──────────────────
+        # rsi_at_cross is captured alongside cross_week, and a cross
+        # that already happened at RSI >= 60 is thrown out entirely —
+        # that's not contra territory anymore, no matter how clean
+        # the rest of the technical shape looks.
         cross_week = None
+        rsi_at_cross = None
         for w in range(3):
             r_now   = rsi_s.iloc[-(w+1)]
             r_prev  = rsi_s.iloc[-(w+2)]
@@ -486,7 +532,12 @@ for ticker in nifty500:
             rs_prev = rsi_sma.iloc[-(w+2)]
             if r_now > rs_now and r_prev <= rs_prev:
                 cross_week = w
+                rsi_at_cross = r_now
                 break
+
+        if cross_week is not None and rsi_at_cross is not None and rsi_at_cross >= 60:
+            cross_week = None
+            rsi_at_cross = None
 
         # ── PILLAR B: Momentum / Signal (max 60) — UNCHANGED
         # structure, only vol_ratio's INPUT changed (now includes
@@ -518,6 +569,41 @@ for ticker in nifty500:
         else:
             phase = "Below Threshold"
 
+        # ──────────────────────────────────────────────────────
+        # QUALITY SCORE — mirrors Cell 9's compute_quality_score()
+        # exactly, so the live weekly scan and the validated 5-year
+        # backtest bucket definitions never drift apart:
+        #   RSI-at-cross component (0-3) + drawdown component (0-3)
+        #   + regime bonus (0-1) = max 7
+        #   6-7 PREMIUM | 4-5 HIGH | 2-3 MEDIUM | 0-1 LOW
+        # Only computed for stocks with an active, valid cross —
+        # matches the backtest, which only scores actual signals.
+        # ──────────────────────────────────────────────────────
+        if cross_week is not None and rsi_at_cross is not None:
+            q = 0
+            q += 3 if rsi_at_cross >= 55 else (2 if rsi_at_cross >= 45 else (1 if rsi_at_cross >= 35 else 0))
+            q += 3 if drawdown >= 55 else (2 if drawdown >= 45 else (1 if drawdown >= 35 else 0))
+            q += 1 if contra_regime in ["CAUTION", "BEAR"] else 0
+            quality_score  = q
+            quality_bucket = ("PREMIUM" if q >= 6 else
+                               "HIGH"    if q >= 4 else
+                               "MEDIUM"  if q >= 2 else
+                               "LOW")
+        else:
+            quality_score, quality_bucket = 0, "—"
+
+        # ──────────────────────────────────────────────────────
+        # ARCHETYPE A — deep crash + contra-zone cross + volume
+        # confirmation. Identified as the highest-impact signal
+        # subset: >45% drawdown, RSI cross between 45-60, 2x+ volume.
+        # ──────────────────────────────────────────────────────
+        archetype_a = (
+            drawdown >= 45 and
+            cross_week is not None and
+            rsi_at_cross is not None and 45 <= rsi_at_cross <= 60 and
+            vol_ratio >= 2.0
+        )
+
         # ── Append row (exact column spec) ───────────────────
         contra_rows.append({
             "week":          WEEK_TAG,
@@ -539,6 +625,9 @@ for ticker in nifty500:
             "low_confirmed": "Yes" if low_confirmed else "No",
             "pillar_a":      pillar_a,
             "pillar_b":      pillar_b,
+            "quality_score":  quality_score,
+            "quality_bucket": quality_bucket,
+            "archetype_a":    "Yes" if archetype_a else "No",
         })
 
     except Exception:
@@ -547,7 +636,8 @@ for ticker in nifty500:
 contra_df = pd.DataFrame(contra_rows) if contra_rows else pd.DataFrame(columns=[
     "week","ticker","company","sector","price","score","phase",
     "RSI","drawdown","de_ratio","cross_week","vol_ratio","promoter",
-    "sales_gr","pat_gr","pct_from_low","low_confirmed","pillar_a","pillar_b"
+    "sales_gr","pat_gr","pct_from_low","low_confirmed","pillar_a","pillar_b",
+    "quality_score","quality_bucket","archetype_a"
 ])
 
 # Derived views (for Telegram summary only — not written to sheets)
@@ -563,6 +653,7 @@ CONTRA SCREENER RESULTS
   Phase 1 Watchlist   : {len(p1_df)}
   On Radar            : {len(contra_df[contra_df['phase']=='On Radar'])}
   Below Threshold     : {len(contra_df[contra_df['phase']=='Below Threshold'])}
+  Archetype A signals : {len(contra_df[contra_df['archetype_a']=='Yes'])}
 {'='*65}
 """)
 
@@ -869,7 +960,14 @@ for ticker in nifty500:
 
         # ── FUNDAMENTAL FLOOR (disqualifier, applied below after
         # scoring — same pattern as the liquidity/EPS filters above) ──
-        promoter_pct  = safe_get(info, "promoterHolding", None)
+        # promoterHolding does not exist in yfinance's .info dict and
+        # always returns None — heldPercentInsiders is the correct
+        # field. Fixed to match Contra's field (previously this floor
+        # silently never fired). yfinance returns it as a 0-1 fraction,
+        # so scale to a percentage before comparing to FLOOR_PROMOTER_MIN.
+        promoter_pct  = safe_get(info, "heldPercentInsiders", None)
+        if promoter_pct is not None:
+            promoter_pct = promoter_pct * 100
         de_ratio_mom  = safe_get(info, "debtToEquity", None)
         fails_floor = (
             (sales_gr     is not None and sales_gr     <= FLOOR_SALES_GR_MIN) or
@@ -1061,7 +1159,8 @@ SHEET_NAME = "Nifty500 Screener"
 CONTRA_METRICS = [
     "price", "total_score", "phase", "RSI", "drawdown", "de_ratio",
     "cross_week", "vol_ratio", "promoter", "sales_gr", "pat_gr",
-    "pct_from_low", "low_confirmed", "pillar_a", "pillar_b"
+    "pct_from_low", "low_confirmed", "pillar_a", "pillar_b",
+    "quality_score", "quality_bucket", "archetype_a"
 ]
 
 MOMENTUM_METRICS = [
@@ -1252,7 +1351,8 @@ Momentum Data: {len(momentum_df)} rows appended
             f"Nifty500 RSI {n_rsi_val} | "
             f"{'Below' if n_sma_diff < 0 else 'Above'} 30W SMA "
             f"({'+' if n_sma_diff >= 0 else ''}{n_sma_diff}%)\n"
-            f"   1M: {idx_1m:+.1f}%  3M: {idx_3m:+.1f}%  6M: {idx_6m:+.1f}%"
+            f"   1M: {idx_1m:+.1f}%  3M: {idx_3m:+.1f}%  6M: {idx_6m:+.1f}%\n"
+            f"   Contra regime: {contra_regime}"
         )
     except Exception:
         mkt_line = f"{'🔴' if regime == 'Risk-Off' else '🟢'} <b>Market:</b> {regime}"
