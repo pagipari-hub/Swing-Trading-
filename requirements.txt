@@ -1,7 +1,7 @@
 yfinance
 pandas
 numpy
-TA-Lib
+pandas-ta
 requests
 gspread
 google-auth
