@@ -1,12 +1,18 @@
 name: Nifty 500 Screener
+
 on:
+  # Auto run: Saturday 10:00 AM IST = 4:30 UTC
   schedule:
     - cron: '30 4 * * 6'
+
+  # Manual run: GitHub pe "Run workflow" button se
   workflow_dispatch:
+
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -16,26 +22,25 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Get week number
-        id: date
-        run: echo "week=$(date +'%Y-W%V')" >> $GITHUB_OUTPUT
-
       - name: Cache stock data
         uses: actions/cache@v4
         with:
           path: /tmp/nifty500_cache
-          key: nifty500-v2-${{ steps.date.outputs.week }}
+          key: nifty500-v2-${{ github.run_date }}
 
       - name: Install dependencies
-        run: pip install yfinance pandas numpy ta requests gspread google-auth pytz
+        run: pip install -r requirements.txt
 
       - name: Run Screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      - name: Run screener
         run: python screener.py
-      - name: Run performance tracker
-        run: python performance_tracker.py
 
+      - name: Run performance tracker
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python performance_tracker.py
