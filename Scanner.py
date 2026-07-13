@@ -491,6 +491,8 @@ for ticker in nifty500:
                 "quality_score":  0,
                 "quality_bucket": "—",
                 "archetype_a":    "No",
+                "cross_failed":   "—",
+                "re_confirmed":   "—",
             })
             continue
 
@@ -518,11 +520,13 @@ for ticker in nifty500:
               3 if relative_weakness >= 5  else 0)
         pillar_a = a1 + a2 + a3 + a4 + a5   # max 50
 
-        # ── RSI cross (within last 3 weeks) ──────────────────
-        # rsi_at_cross is captured alongside cross_week, and a cross
-        # that already happened at RSI >= 60 is thrown out entirely —
-        # that's not contra territory anymore, no matter how clean
-        # the rest of the technical shape looks.
+        # ──────────────────────────────────────────────────────
+        # RSI cross (within last 3 weeks), WITH failure/re-confirmation
+        # validation (fix — previously a cross found 2-3 weeks back
+        # was scored as live even if RSI had since fallen back below
+        # its SMA; and a cross that failed then re-crossed got no
+        # credit for the stronger re-test-and-hold pattern).
+        # ──────────────────────────────────────────────────────
         cross_week = None
         rsi_at_cross = None
         for w in range(3):
@@ -539,15 +543,41 @@ for ticker in nifty500:
             cross_week = None
             rsi_at_cross = None
 
-        # ── PILLAR B: Momentum / Signal (max 60) — UNCHANGED
-        # structure, only vol_ratio's INPUT changed (now includes
-        # peak-volume lookback from above)
+        # FAILED CROSS — the cross itself happened in a prior week
+        # (not this week), but RSI has since dropped back below its
+        # SMA. The signal already broke; don't let a stale cross
+        # still score as a live Phase 2 entry.
+        cross_failed = False
+        if cross_week is not None and cross_week > 0 and rsi <= rsi_sm:
+            cross_failed = True
+            cross_week = None
+            rsi_at_cross = None
+
+        # RE-CONFIRMATION — today's still-valid cross was preceded
+        # (within the prior ~5 weeks) by an earlier cross that had
+        # already failed. A re-test-and-hold is a stronger pattern
+        # than a first-time cross (this is the Neogen Chemicals shape).
+        re_confirmed = False
+        if cross_week is not None:
+            for w2 in range(cross_week + 1, min(cross_week + 6, len(rsi_s) - 1)):
+                r_n, r_p   = rsi_s.iloc[-(w2+1)], rsi_s.iloc[-(w2+2)]
+                rs_n, rs_p = rsi_sma.iloc[-(w2+1)], rsi_sma.iloc[-(w2+2)]
+                if r_n > rs_n and r_p <= rs_p:
+                    re_confirmed = True
+                    break
+
+        # ── PILLAR B: Momentum / Signal (max 60, +5 re-confirm bonus)
+        # structure otherwise UNCHANGED, vol_ratio's INPUT unchanged
+        # (peak-volume lookback from above)
         # ──────────────────────────────────────────────────────
         if   cross_week == 0: b1 = 30
         elif cross_week == 1: b1 = 22
         elif cross_week == 2: b1 = 15
         elif rsi > rsi_sm:    b1 = 8
         else:                 b1 = 0
+
+        if re_confirmed:
+            b1 += 5   # re-test-and-hold bonus
 
         b2 = (20 if rsi < 30 else
               15 if rsi < 40 else
@@ -604,7 +634,7 @@ for ticker in nifty500:
             vol_ratio >= 2.0
         )
 
-        # ── Append row (exact column spec) ───────────────────
+        # ── Append row (exact column spec + cross_failed/re_confirmed) ─
         contra_rows.append({
             "week":          WEEK_TAG,
             "ticker":        ticker,
@@ -628,6 +658,8 @@ for ticker in nifty500:
             "quality_score":  quality_score,
             "quality_bucket": quality_bucket,
             "archetype_a":    "Yes" if archetype_a else "No",
+            "cross_failed":   "Yes" if cross_failed else "No",
+            "re_confirmed":   "Yes" if re_confirmed else "No",
         })
 
     except Exception:
@@ -637,7 +669,7 @@ contra_df = pd.DataFrame(contra_rows) if contra_rows else pd.DataFrame(columns=[
     "week","ticker","company","sector","price","score","phase",
     "RSI","drawdown","de_ratio","cross_week","vol_ratio","promoter",
     "sales_gr","pat_gr","pct_from_low","low_confirmed","pillar_a","pillar_b",
-    "quality_score","quality_bucket","archetype_a"
+    "quality_score","quality_bucket","archetype_a","cross_failed","re_confirmed"
 ])
 
 # Derived views (for Telegram summary only — not written to sheets)
@@ -654,6 +686,8 @@ CONTRA SCREENER RESULTS
   On Radar            : {len(contra_df[contra_df['phase']=='On Radar'])}
   Below Threshold     : {len(contra_df[contra_df['phase']=='Below Threshold'])}
   Archetype A signals : {len(contra_df[contra_df['archetype_a']=='Yes'])}
+  Failed crosses       : {len(contra_df[contra_df['cross_failed']=='Yes'])}
+  Re-confirmed crosses : {len(contra_df[contra_df['re_confirmed']=='Yes'])}
 {'='*65}
 """)
 
@@ -823,6 +857,8 @@ for ticker in nifty500:
                 "pillar_b":      0,
                 "pillar_c":      0,
                 "pillar_d":      0,
+                "cross_failed":  "—",
+                "re_confirmed":  "—",
             })
             continue
 
@@ -855,6 +891,8 @@ for ticker in nifty500:
                 "pillar_b":      0,
                 "pillar_c":      0,
                 "pillar_d":      0,
+                "cross_failed":  "—",
+                "re_confirmed":  "—",
             })
             continue
 
@@ -901,6 +939,10 @@ for ticker in nifty500:
             rsi_s.iloc[-3] > rsi_s.iloc[-4]
         )
 
+        # ──────────────────────────────────────────────────────
+        # RSI cross (within last WEEKS_VALID+1 weeks), WITH
+        # failure/re-confirmation validation — same fix as Contra.
+        # ──────────────────────────────────────────────────────
         cross_week = rsi_at_cross = None
         for w in range(WEEKS_VALID + 1):
             r_now  = rsi_s.iloc[-(w+1)]
@@ -910,6 +952,25 @@ for ticker in nifty500:
 
         if cross_week is not None and rsi_at_cross is not None and rsi_at_cross > RSI_UPPER:
             cross_week = rsi_at_cross = None
+
+        # FAILED CROSS — cross happened in a prior week but RSI has
+        # since fallen back below 60. Stale, don't score as live.
+        cross_failed = False
+        if cross_week is not None and cross_week > 0 and rsi_now < 60:
+            cross_failed = True
+            cross_week = None
+            rsi_at_cross = None
+
+        # RE-CONFIRMATION — still-valid cross was preceded by an
+        # earlier failed cross within the prior ~5 weeks (re-test-
+        # and-hold, a stronger pattern than a first-time cross).
+        re_confirmed = False
+        if cross_week is not None:
+            for w2 in range(cross_week + 1, min(cross_week + 6, len(rsi_s) - 1)):
+                r_n, r_p = rsi_s.iloc[-(w2+1)], rsi_s.iloc[-(w2+2)]
+                if r_n >= 60 and r_p < 60:
+                    re_confirmed = True
+                    break
 
         # ── Volume ───────────────────────────────────────────
         vol_avg   = volume.iloc[-VOL_WINDOW-1:-1].mean()
@@ -1009,7 +1070,8 @@ for ticker in nifty500:
         pillar_a = a1 + a2 + a3 + a4 + a5 + a6   # max 50
 
         # ──────────────────────────────────────────────────────
-        # PILLAR B: RSI Signal + Trend Quality (max 35, ATR removed)
+        # PILLAR B: RSI Signal + Trend Quality (max 35 + 3 re-confirm
+        # bonus, ATR removed)
         # ──────────────────────────────────────────────────────
         # B1 — RSI cross quality: graduated by recency AND by how hot
         # RSI already was at the moment of crossing (a late, hot cross
@@ -1025,6 +1087,10 @@ for ticker in nifty500:
             else:  # cross_week == 2 or 3
                 b1 = 10 if hot <= 65 else (6 if hot <= 70 else 3)
 
+        if re_confirmed:
+            b1 += 3   # re-test-and-hold bonus (smaller than Contra's,
+                      # since B1 here is already graduated by heat)
+
         # B2 — RSI slope confirmation
         b2 = 5 if (b1 > 0 and rsi_slope_ok) else 0
 
@@ -1038,7 +1104,7 @@ for ticker in nifty500:
         tq_count = sum(1 for c in tq_conditions if c)
         b3 = 10 if tq_count == 3 else (5 if tq_count == 2 else 0)
 
-        pillar_b = b1 + b2 + b3   # max 35
+        pillar_b = b1 + b2 + b3   # max 35 (+3 re-confirm)
 
         # ──────────────────────────────────────────────────────
         # PILLAR C: Sector strength (max 15) — UNCHANGED
@@ -1062,7 +1128,7 @@ for ticker in nifty500:
 
         pillar_d = d1 + d2   # max 13
 
-        raw   = pillar_a + pillar_b + pillar_c + pillar_d   # max 113
+        raw   = pillar_a + pillar_b + pillar_c + pillar_d   # max 113 (+ re-confirm bonus)
         total = round(round((raw / RAW_MAX) * 100) * regime_mult)
 
         # ── Label (new tiers, includes 🟢 Emerging Momentum) ─
@@ -1083,7 +1149,7 @@ for ticker in nifty500:
         # ── earn_gr for sheet (use YoY qfin if available) ────
         earn_gr_out = pat_gr if pat_gr is not None else earn_gr
 
-        # ── Append row (exact column spec) ───────────────────
+        # ── Append row (exact column spec + cross_failed/re_confirmed) ─
         momentum_rows.append({
             "week":          WEEK_TAG,
             "ticker":        ticker,
@@ -1103,6 +1169,8 @@ for ticker in nifty500:
             "pillar_b":      pillar_b,
             "pillar_c":      pillar_c,
             "pillar_d":      pillar_d,
+            "cross_failed":  "Yes" if cross_failed else "No",
+            "re_confirmed":  "Yes" if re_confirmed else "No",
         })
 
     except Exception:
@@ -1112,7 +1180,7 @@ momentum_df = pd.DataFrame(momentum_rows) if momentum_rows else pd.DataFrame(col
     "week","ticker","company","sector","price","score","label",
     "RSI","rs_periods","earn_gr","pct_from_high","vol_ratio",
     "new_52w_high","new_5y_high",
-    "pillar_a","pillar_b","pillar_c","pillar_d"
+    "pillar_a","pillar_b","pillar_c","pillar_d","cross_failed","re_confirmed"
 ])
 
 # Derived views for Telegram summary
@@ -1130,6 +1198,8 @@ MOMENTUM SCREENER | Regime: {regime}
   Entry candidates   : {len(mom_entry)}
   Emerging Momentum  : {len(mom_emerging)}
   Watch list         : {len(mom_watch)}
+  Failed crosses      : {len(momentum_df[momentum_df['cross_failed']=='Yes'])}
+  Re-confirmed crosses: {len(momentum_df[momentum_df['re_confirmed']=='Yes'])}
 {'='*65}
 """)
 
@@ -1155,18 +1225,24 @@ print("\n[5/5] Exporting to Google Sheets...")
 
 SHEET_NAME = "Nifty500 Screener"
 
-# Metrics in row order
+# Metrics in row order — cross_failed / re_confirmed added at the end
+# (additive: existing rows/columns unaffected, sheet just grows by 2
+# metric-rows per ticker on next full rebuild; on an already-built
+# sheet these simply appear as new rows the next time the sheet is
+# rebuilt from scratch, or you can add them manually once).
 CONTRA_METRICS = [
     "price", "total_score", "phase", "RSI", "drawdown", "de_ratio",
     "cross_week", "vol_ratio", "promoter", "sales_gr", "pat_gr",
     "pct_from_low", "low_confirmed", "pillar_a", "pillar_b",
-    "quality_score", "quality_bucket", "archetype_a"
+    "quality_score", "quality_bucket", "archetype_a",
+    "cross_failed", "re_confirmed"
 ]
 
 MOMENTUM_METRICS = [
     "price", "total_score", "label", "RSI", "rs_periods", "earn_gr",
     "pct_from_high", "vol_ratio", "new_52w_high", "new_5y_high",
-    "pillar_a", "pillar_b", "pillar_c", "pillar_d"
+    "pillar_a", "pillar_b", "pillar_c", "pillar_d",
+    "cross_failed", "re_confirmed"
 ]
 
 def ensure_worksheet(sh, name, rows=15000, cols=300):
@@ -1254,6 +1330,40 @@ def build_transposed_sheet(ws, df, metrics, week_tag, has_cyclical=False):
         ws.update(values=[[week_tag]],
                   range_name=f"{col_letter(week_col_idx)}1")
         print(f"   📅 '{ws.title}' — New week col {col_letter(week_col_idx)} = {week_tag}")
+
+    # ── Detect metric rows that don't exist yet in the sheet
+    # (e.g. cross_failed / re_confirmed on a sheet built before this
+    # fix was added) and append them — additive, no existing rows
+    # touched or reordered. ─────────────────────────────────────
+    existing_keys = {row[0] for row in existing[1:] if row}
+    tickers_sorted = sorted(df["ticker"].unique())
+    new_rows_to_append = []
+    for ticker in tickers_sorted:
+        row_df = df[df["ticker"] == ticker]
+        if row_df.empty:
+            continue
+        r       = row_df.iloc[0]
+        company = str(r.get("company", ""))
+        sector  = str(r.get("sector", ""))
+        is_cyc  = str(r.get("is_cyclical", "")) if has_cyclical else None
+        for metric in metrics:
+            key = f"{ticker}|{metric}"
+            if key in existing_keys:
+                continue
+            row = [key, metric, ticker, company, sector]
+            if has_cyclical:
+                row.append(is_cyc)
+            # pad blank cells up to the week column, then the value
+            row += [""] * (week_col_idx - len(row) - 1)
+            row.append(str(r.get(metric, "—")))
+            new_rows_to_append.append(row)
+
+    if new_rows_to_append:
+        ws.append_rows(new_rows_to_append, value_input_option="RAW")
+        print(f"   ➕ '{ws.title}' — {len(new_rows_to_append)} new metric rows appended "
+              f"(e.g. cross_failed/re_confirmed on a pre-existing sheet)")
+        # Refresh existing so the update loop below also sees these rows
+        existing = ws.get_all_values()
 
     # Build key→value map from df
     val_map = {}
