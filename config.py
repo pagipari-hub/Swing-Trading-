@@ -26,6 +26,17 @@ NIFTY500_LIST_FILE  = os.path.join(CACHE_DIR, "nifty500_list.pkl")
 NIFTY500_SEED_FILE  = "nifty500_seed.csv"   # committed to repo — last-resort fallback
 # NOTE: q_fin_data is intentionally NOT cached — always fresh each run
 
+# price_data/fund_data are meant to refresh weekly (matches WEEK_TAG
+# cadence). This is a SECOND, independent line of defense against
+# stale caching — belt-and-suspenders alongside the GitHub Actions
+# cache key itself being date-scoped. If a future workflow edit ever
+# reintroduces a constant/broken cache key (as happened once already —
+# `github.run_date` doesn't exist as a context property, so the key
+# silently resolved to a fixed string and price/fund data was frozen
+# for weeks with no error), this catches it here in code rather than
+# depending on the YAML being correct.
+CACHE_MAX_AGE_DAYS = 8   # small buffer over the 7-day refresh cycle
+
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ── Index tickers ─────────────────────────────────────────────
