@@ -1,8 +1,0 @@
-yfinance
-pandas
-numpy
-pandas_ta
-requests
-gspread
-google-auth
-pytz
