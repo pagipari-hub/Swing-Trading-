@@ -94,7 +94,26 @@ def load_nifty500_tickers():
         print(f"⚠️  NSE fetch failed: {e}")
         return pd.DataFrame(columns=["symbol","company","sector","yf_ticker"])
 
-nifty500_df    = load_nifty500_tickers()
+NIFTY500_LIST_FILE = "/tmp/nifty500_cache/nifty500_list.pkl"
+os.makedirs(os.path.dirname(NIFTY500_LIST_FILE), exist_ok=True)
+
+nifty500_df = load_nifty500_tickers()
+
+if nifty500_df.empty:
+    # Live NSE fetch failed (e.g. 503) — fall back to last known-good list
+    # rather than proceeding with an empty universe.
+    if os.path.exists(NIFTY500_LIST_FILE):
+        with open(NIFTY500_LIST_FILE, "rb") as f:
+            nifty500_df = pickle.load(f)
+        print(f"  ↩️  Falling back to cached Nifty 500 list — {len(nifty500_df)} stocks "
+              f"(may be stale; live NSE fetch was unavailable)")
+    else:
+        print("  ❌ No cached Nifty 500 list available either — cannot proceed.")
+else:
+    # Live fetch succeeded — refresh the fallback cache for next time.
+    with open(NIFTY500_LIST_FILE, "wb") as f:
+        pickle.dump(nifty500_df, f)
+
 nifty500       = nifty500_df["yf_ticker"].tolist()
 sector_lookup  = dict(zip(nifty500_df["yf_ticker"], nifty500_df["sector"]))
 company_lookup = dict(zip(nifty500_df["yf_ticker"], nifty500_df["company"]))
