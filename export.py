@@ -8,11 +8,47 @@
 # overwriting an existing week's column with all-zero data.
 # ============================================================
 
+import time
 import gspread
 
 from config import SHEET_NAME, WEEK_TAG, TIMESTAMP, CYCLICAL_NSE, CONTRA_METRICS, MOMENTUM_METRICS
 from sheets_io import get_gspread_client, ensure_worksheet, build_transposed_sheet
 from telegram_notify import send_telegram
+
+# Retry transient Google API failures (5xx — the service's problem, not
+# ours, and it typically clears within seconds). Don't retry on things
+# like auth errors (403) or "not found" (404) — those won't fix
+# themselves by waiting, so fail fast on those instead.
+RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+MAX_RETRIES = 4
+BACKOFF_BASE_SECONDS = 5   # 5s, 10s, 20s, 40s
+
+
+def _is_retryable(exc):
+    if isinstance(exc, gspread.exceptions.APIError):
+        try:
+            status = exc.response.status_code
+        except Exception:
+            status = None
+        return status in RETRYABLE_STATUS_CODES
+    return False
+
+
+def _with_retries(fn, label):
+    """Runs fn() with exponential backoff on transient (5xx) API errors."""
+    last_exc = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if not _is_retryable(e) or attempt == MAX_RETRIES:
+                raise
+            wait = BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+            print(f"  ⚠️  {label} failed (attempt {attempt}/{MAX_RETRIES}): {e} "
+                  f"— retrying in {wait}s...")
+            time.sleep(wait)
+    raise last_exc
 
 
 def export_and_notify(contra_df, momentum_df, p2_df, p1_df,
@@ -42,22 +78,34 @@ def export_and_notify(contra_df, momentum_df, p2_df, p1_df,
     
     try:
         gc = get_gspread_client()
-    
+
         try:
-            sh = gc.open(SHEET_NAME)
+            sh = _with_retries(lambda: gc.open(SHEET_NAME), "Open spreadsheet")
             print(f"✅ Opened existing spreadsheet: {SHEET_NAME}")
         except gspread.SpreadsheetNotFound:
             sh = gc.create(SHEET_NAME)
             print(f"📄 Created new spreadsheet: {SHEET_NAME}")
-    
-        ws_contra = ensure_worksheet(sh, "Contra Data", rows=15000, cols=300)
-        build_transposed_sheet(ws_contra, contra_export, CONTRA_METRICS,
-                               WEEK_TAG, has_cyclical=False)
-    
-        ws_mom = ensure_worksheet(sh, "Momentum Data", rows=15000, cols=300)
-        build_transposed_sheet(ws_mom, momentum_export, MOMENTUM_METRICS,
-                               WEEK_TAG, has_cyclical=True)
-    
+
+        ws_contra = _with_retries(
+            lambda: ensure_worksheet(sh, "Contra Data", rows=15000, cols=300),
+            "Open Contra Data worksheet",
+        )
+        _with_retries(
+            lambda: build_transposed_sheet(ws_contra, contra_export, CONTRA_METRICS,
+                                            WEEK_TAG, has_cyclical=False),
+            "Write Contra Data",
+        )
+
+        ws_mom = _with_retries(
+            lambda: ensure_worksheet(sh, "Momentum Data", rows=15000, cols=300),
+            "Open Momentum Data worksheet",
+        )
+        _with_retries(
+            lambda: build_transposed_sheet(ws_mom, momentum_export, MOMENTUM_METRICS,
+                                            WEEK_TAG, has_cyclical=True),
+            "Write Momentum Data",
+        )
+
         print(f"""
 {'='*55}
 ✅ EXPORT COMPLETE — {TIMESTAMP}
