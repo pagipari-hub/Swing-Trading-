@@ -21,10 +21,9 @@ from contra_screener import (
 from sector_screener import run_sector_screener
 from export import export_and_notify
 
-# ADAPT: swap for whatever your telegram_notify.py actually exposes
-# (used only for the sector Telegram section — Contra's own Telegram
-# message still goes out through export_and_notify() as before).
-from telegram_notify import send_telegram_message
+# Used only for the sector Telegram section — Contra's own Telegram
+# message still goes out through export_and_notify() as before.
+from telegram_notify import send_telegram
 
 
 def main():
@@ -74,7 +73,7 @@ def main():
     # ── Sector Signals (Contra Phase 2 only + rotation ranking) ───────────
     sector_results = run_sector_screener()
     if not sector_results["contra_df"].empty or not sector_results["rotation_df"].empty:
-        send_telegram_message(sector_results["telegram_text"])
+        send_telegram(sector_results["telegram_text"])
     else:
         print("[main] Sector screener produced no data — skipping sector Telegram send.")
 
