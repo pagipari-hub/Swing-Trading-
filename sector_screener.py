@@ -185,7 +185,14 @@ def resolve_sector_instrument(sector: str, cfg: dict) -> SectorInstrument:
 
 
 def resolve_all_sectors() -> list[SectorInstrument]:
-    return [resolve_sector_instrument(s, cfg) for s, cfg in SECTOR_CANDIDATES.items()]
+    print("\n📥 Resolving sector instruments (ETF where liquid, index fallback otherwise)...")
+    instruments = []
+    for sector, cfg in SECTOR_CANDIDATES.items():
+        inst = resolve_sector_instrument(sector, cfg)
+        kind = "ETF" if inst.is_tradeable_etf else "INDEX (fallback — no liquid ETF)"
+        print(f"   {sector:20s} -> {inst.ticker:20s} [{kind}] avg_vol={inst.avg_volume:,.0f}")
+        instruments.append(inst)
+    return instruments
 
 
 # --------------------------------------------------------------------------
@@ -308,11 +315,16 @@ def detect_sector_contra_signal(inst: SectorInstrument) -> Optional[SectorContra
 
 
 def screen_sector_contra(instruments: list[SectorInstrument]) -> list[SectorContraSignal]:
+    print("\n📊 Sector Contra (Phase 2 only — drawdown + RSI cross, no volume gate)...")
     signals = []
     for inst in instruments:
         sig = detect_sector_contra_signal(inst)
         if sig:
+            print(f"   ✅ {sig.sector:20s} SIGNAL — {sig.quality_bucket} "
+                  f"(RSI {sig.rsi_at_cross}, DD {sig.drawdown_pct}%)")
             signals.append(sig)
+        else:
+            print(f"   —  {inst.sector:20s} no signal")
     return signals
 
 
@@ -341,6 +353,7 @@ def _save_ranks(ranks: dict) -> None:
 
 
 def compute_rotation_ranking(instruments: list[SectorInstrument]) -> list[SectorRotationRow]:
+    print("\n📈 Sector Rotation ranking (4W/12W/26W blended RS)...")
     prev_ranks = _load_prev_ranks()
     rows = []
 
@@ -400,6 +413,11 @@ def compute_rotation_ranking(instruments: list[SectorInstrument]) -> list[Sector
         ))
 
     _save_ranks(new_ranks)
+
+    for row in result:
+        arrow = {"UP": "🔼", "DOWN": "🔽", "FLAT": "▪️", "NEW": "🆕"}[row.trend]
+        print(f"   {arrow} #{row.rank:<2d} {row.sector:20s} RS {row.composite_rs:+.1f}%")
+
     return result
 
 
@@ -487,6 +505,10 @@ def export_to_sheet(contra_df: pd.DataFrame, rotation_df: pd.DataFrame) -> None:
 # --------------------------------------------------------------------------
 
 def run_sector_screener() -> dict:
+    print("=" * 65)
+    print("SECTOR SCREENER")
+    print("=" * 65)
+
     instruments = resolve_all_sectors()
 
     contra_signals = screen_sector_contra(instruments)
@@ -499,6 +521,19 @@ def run_sector_screener() -> dict:
 
     telegram_text = format_telegram_section(contra_signals, rotation_rows)
 
+    etf_count = sum(1 for i in instruments if i.is_tradeable_etf)
+    print(f"""
+{'='*65}
+SECTOR SCREENER RESULTS
+{'='*65}
+  Sectors screened     : {len(instruments)}
+  Tradeable ETF found  : {etf_count}/{len(instruments)}
+  Index-only fallback  : {len(instruments) - etf_count}/{len(instruments)}
+  Contra signals fired : {len(contra_signals)}
+  Rotation ranked      : {len(rotation_rows)}
+{'='*65}
+""")
+
     return {
         "contra_df": contra_df,
         "rotation_df": rotation_df,
@@ -510,7 +545,3 @@ def run_sector_screener() -> dict:
 if __name__ == "__main__":
     result = run_sector_screener()
     print(result["telegram_text"])
-    print("\n--- Instrument resolution ---")
-    for inst in result["instruments"]:
-        kind = "ETF" if inst.is_tradeable_etf else "INDEX (fallback)"
-        print(f"{inst.sector:20s} -> {inst.ticker:15s} [{kind}] avg_vol={inst.avg_volume:,.0f}")
