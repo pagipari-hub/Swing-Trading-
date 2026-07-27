@@ -54,21 +54,8 @@ def main():
         sector_median_drawdown, contra_regime, WEEK_TAG,
     )
 
-    # ── Export + Telegram (Contra only now — momentum args dropped) ───────
-    # NOTE: export_and_notify() previously also took momentum_df, mom_entry,
-    # mom_emerging, mom_watch, regime, idx_1m/3m/6m, n_rsi, n_price, n_sma30.
-    # If export.py's signature hasn't been updated to drop those params,
-    # you'll need to either:
-    #   (a) update export_and_notify()'s signature to remove them, or
-    #   (b) pass empty placeholders (empty DataFrame / None / empty lists)
-    #       for each dropped momentum arg so the call still matches.
-    # I don't have export.py's source, so I can't safely edit it here —
-    # this call assumes (a). If you'd rather do (b), tell me and I'll
-    # write the placeholder version instead.
-    export_and_notify(
-        contra_df, p2_df, p1_df,
-        sector_lookup, contra_regime,
-    )
+    # ── Export + Telegram (Contra only — Momentum now runs standalone) ────
+    export_and_notify(contra_df, p2_df, p1_df, contra_regime)
 
     # ── Sector Signals (Contra Phase 2 only + rotation ranking) ───────────
     sector_results = run_sector_screener()
