@@ -423,10 +423,10 @@ def format_telegram_section(
     signals: list[SectorContraSignal],
     rotation: list[SectorRotationRow],
 ) -> str:
-    lines = ["📊 *Sector Signals*"]
+    lines = ["📊 <b>Sector Signals</b>"]
 
     if signals:
-        lines.append("\n*Contra Signals Fired:*")
+        lines.append("\n<b>Contra Signals Fired:</b>")
         for s in signals:
             tag = "✅ ETF" if s.is_tradeable_etf else "⚠️ Index-only (no liquid ETF)"
             lines.append(
@@ -434,16 +434,16 @@ def format_telegram_section(
                 f"RSI {s.rsi_at_cross} | DD {s.drawdown_pct}% | {tag}"
             )
     else:
-        lines.append("\n_No sector Contra signals this week._")
+        lines.append("\nNo sector Contra signals this week.")
 
     if rotation:
         top3 = [r for r in rotation if r.rank <= 3]
         bottom3 = sorted(rotation, key=lambda r: r.rank, reverse=True)[:3]
-        lines.append("\n*Rotation — Top 3:*")
+        lines.append("\n<b>Rotation — Top 3:</b>")
         for r in top3:
             arrow = {"UP": "🔼", "DOWN": "🔽", "FLAT": "▪️", "NEW": "🆕"}[r.trend]
             lines.append(f"{arrow} #{r.rank} {r.sector} (RS {r.composite_rs}%)")
-        lines.append("\n*Rotation — Bottom 3:*")
+        lines.append("\n<b>Rotation — Bottom 3:</b>")
         for r in bottom3:
             arrow = {"UP": "🔼", "DOWN": "🔽", "FLAT": "▪️", "NEW": "🆕"}[r.trend]
             lines.append(f"{arrow} #{r.rank} {r.sector} (RS {r.composite_rs}%)")
