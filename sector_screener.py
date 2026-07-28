@@ -470,34 +470,48 @@ def format_telegram_section(
 
 
 # --------------------------------------------------------------------------
-# Sheets export -- ADAPT to match sheets_io.py's actual write helpers.
-# This assumes get_gspread_client() and SHEET_NAME are importable from
-# sheets_io.py, matching the pattern already used in performance_tracker.py.
+# Sheets export -- uses the same transposed weekly-column structure as
+# Contra/Momentum (build_transposed_sheet from sheets_io.py) so Sector
+# data accumulates history week over week instead of being overwritten.
 # --------------------------------------------------------------------------
+
+SECTOR_CONTRA_METRICS = [
+    "is_tradeable_etf", "signal_date", "rsi_at_cross", "drawdown_pct",
+    "cross_failed", "re_confirmed", "quality_bucket", "quality_score",
+]
+
+SECTOR_ROTATION_METRICS = [
+    "ret_4w", "ret_12w", "ret_26w", "composite_rs",
+    "rank", "prev_rank", "rank_change", "trend",
+]
+
 
 def export_to_sheet(contra_df: pd.DataFrame, rotation_df: pd.DataFrame) -> None:
     try:
-        from sheets_io import get_gspread_client, SHEET_NAME  # ADAPT if names differ
-    except ImportError:
-        print("[sector_screener] sheets_io not importable in this context -- "
+        from config import SHEET_NAME, WEEK_TAG  # ADAPT if imported differently
+        from sheets_io import get_gspread_client, ensure_worksheet, build_transposed_sheet
+    except ImportError as e:
+        print(f"[sector_screener] Required modules not importable ({e}) -- "
               "skipping Sheets export (fine for local/test runs).")
         return
 
     client = get_gspread_client()
     sh = client.open(SHEET_NAME)
 
-    def _write(df: pd.DataFrame, tab_name: str) -> None:
-        if df.empty:
-            df = pd.DataFrame([{"note": "no data this run"}])
-        try:
-            ws = sh.worksheet(tab_name)
-            ws.clear()
-        except Exception:
-            ws = sh.add_worksheet(title=tab_name, rows=str(max(len(df) + 10, 20)), cols="26")
-        ws.update([df.columns.tolist()] + df.values.tolist())
+    if contra_df.empty:
+        print("   ⚠️  Sector Contra: no signals this week -- skipping tab write "
+              "(no week column added for an all-empty week).")
+    else:
+        ws_contra = ensure_worksheet(sh, "Sector Contra", rows=2000, cols=100)
+        build_transposed_sheet(ws_contra, contra_df, SECTOR_CONTRA_METRICS,
+                                WEEK_TAG, has_cyclical=False)
 
-    _write(contra_df, "Sector Contra")
-    _write(rotation_df, "Sector Rotation")
+    if rotation_df.empty:
+        print("   ⚠️  Sector Rotation: no rows this week -- skipping tab write.")
+    else:
+        ws_rotation = ensure_worksheet(sh, "Sector Rotation", rows=2000, cols=100)
+        build_transposed_sheet(ws_rotation, rotation_df, SECTOR_ROTATION_METRICS,
+                                WEEK_TAG, has_cyclical=False)
 
 
 # --------------------------------------------------------------------------
