@@ -63,56 +63,73 @@ ROTATION_WEIGHTS = {"4W": 0.50, "12W": 0.30, "26W": 0.20}
 # treat this dict as a starting point, not ground truth.
 SECTOR_CANDIDATES: dict[str, dict] = {
     "Nifty 50": {
-        "etf_candidates": ["NIFTYBEES.NS", "HDFCNIFETF.NS", "SETFNIF50.NS"],
+        "etf_candidates": ["NIFTYBEES.NS", "HDFCNIFETF.NS", "SETFNIF50.NS",
+                            "KOTAKNIFTY.NS", "BSLNIFTY.NS", "MAN50ETF.NS"],
         "index_fallback": "^NSEI",
     },
     "Nifty Next 50": {
         "etf_candidates": ["JUNIORBEES.NS", "ICICINXT50.NS", "SETFNN50.NS"],
-        "index_fallback": "^NSEI",  # no reliable standalone Yahoo index ticker
+        "index_fallback": "^NIFTYJR",  # confirmed via Wikipedia
     },
     "Bank Nifty": {
         "etf_candidates": ["BANKBEES.NS", "SETFNIFBK.NS", "KOTAKBKETF.NS"],
         "index_fallback": "^NSEBANK",
     },
     "Financial Services": {
-        "etf_candidates": ["ICICIBFSI.NS", "FINIETF.NS"],
-        "index_fallback": "NIFTY_FIN_SERVICE.NS",
+        # ICICIBFSI.NS confirmed dead (404) in live run 2026-07-31 -- removed
+        "etf_candidates": ["FINIETF.NS"],
+        "index_fallback": "^CNXFIN",
     },
     "IT": {
-        "etf_candidates": ["NETFIT.NS", "ICICITECH.NS", "SBIETFIT.NS"],
+        # NETFIT.NS, ICICITECH.NS confirmed dead (404) in live run -- removed.
+        # SBIETFIT.NS confirmed working; KOTAKIT.NS, ITBEES.NS (Nippon),
+        # ITETF.NS (Mirae) added as confirmed-real backups.
+        "etf_candidates": ["SBIETFIT.NS", "KOTAKIT.NS", "ITBEES.NS", "ITETF.NS"],
         "index_fallback": "^CNXIT",
     },
     "FMCG": {
-        "etf_candidates": ["FMCGIETF.NS"],
+        "etf_candidates": ["FMCGIETF.NS"],  # confirmed working
         "index_fallback": "^CNXFMCG",
     },
     "Auto": {
-        "etf_candidates": ["AUTOIETF.NS", "AUTOBEES.NS"],
+        "etf_candidates": ["AUTOIETF.NS"],  # confirmed working
         "index_fallback": "^CNXAUTO",
     },
     "Healthcare": {
-        "etf_candidates": ["PHARMABEES.NS", "HEALTHIETF.NS"],
+        "etf_candidates": ["PHARMABEES.NS"],  # confirmed working
         "index_fallback": "^CNXPHARMA",
     },
     "Metals": {
-        "etf_candidates": ["METALIETF.NS"],
+        "etf_candidates": ["METALIETF.NS"],  # confirmed working
         "index_fallback": "^CNXMETAL",
     },
     "Oil & Gas": {
-        "etf_candidates": ["OILIETF.NS"],
+        "etf_candidates": ["OILIETF.NS"],  # confirmed working
         "index_fallback": "^CNXENERGY",
     },
     "Power": {
-        "etf_candidates": ["POWERIETF.NS"],
-        "index_fallback": "NIFTY_POWER.NS",
+        # POWERIETF.NS confirmed dead (404); no dedicated Nifty Power ETF or
+        # index ticker found on Yahoo despite a wide search. CPSEETF.NS
+        # (Central Public Sector Enterprises ETF) used as an approximate
+        # proxy per your call -- confirmed live/liquid (avg_vol ~1.35M), but
+        # NOT the actual Nifty Power index: it's PSU-focused (ONGC, Coal
+        # India, NTPC, etc.), only ~44% weighted toward Power Generation &
+        # Distribution per its own factsheet. Treat Power's signals here as
+        # directionally indicative, not a precise sector read.
+        "etf_candidates": ["CPSEETF.NS"],
+        "index_fallback": None,
     },
     "Realty": {
-        "etf_candidates": [],  # no confirmed liquid ETF -- index-only for now
-        "index_fallback": "NIFTY_REALTY.NS",
+        "etf_candidates": [],  # no confirmed liquid ETF
+        "index_fallback": "^CNXREALTY",  # confirmed live on Yahoo Finance
     },
     "Chemicals": {
-        "etf_candidates": [],  # no confirmed ETF at all -- index-only for now
-        "index_fallback": "NIFTY_CHEMICALS.NS",
+        # Nifty Chemicals is a newer NSE index (launched 2021) -- no ETF and
+        # no confirmed Yahoo ticker found. This sector currently has NO
+        # working data source; consider dropping it from the screen or
+        # sourcing it via NSE's own API/niftyindices.com instead of yfinance.
+        "etf_candidates": [],
+        "index_fallback": "NIFTY_CHEMICALS.NS",  # unconfirmed, will likely still fail
     },
 }
 
@@ -124,7 +141,7 @@ SECTOR_CANDIDATES: dict[str, dict] = {
 @dataclass
 class SectorInstrument:
     sector: str
-    ticker: str
+    ticker: Optional[str]
     is_tradeable_etf: bool
     avg_volume: float
 
@@ -141,6 +158,8 @@ class SectorContraSignal:
     re_confirmed: bool
     quality_bucket: str
     quality_score: int
+    rotation_bonus: int
+    cross_sector_bonus: int
 
 
 @dataclass
@@ -172,14 +191,19 @@ def _avg_volume(ticker: str, weeks: int = 12) -> float:
 
 
 def resolve_sector_instrument(sector: str, cfg: dict) -> SectorInstrument:
-    """Pick the best tradeable ETF for a sector, or fall back to the index."""
+    """Pick the best tradeable ETF for a sector, or fall back to the index.
+    Returns an instrument with ticker=None if neither an ETF candidate nor
+    an index fallback is available/working -- callers must check for this."""
     for candidate in cfg["etf_candidates"]:
         vol = _avg_volume(candidate)
         if vol >= MIN_AVG_VOLUME:
             return SectorInstrument(sector, candidate, True, vol)
 
+    fallback = cfg.get("index_fallback")
+    if not fallback:
+        return SectorInstrument(sector, None, False, 0.0)
+
     # No candidate cleared the bar (or none exist) -- use index for signal only
-    fallback = cfg["index_fallback"]
     vol = _avg_volume(fallback)
     return SectorInstrument(sector, fallback, False, vol)
 
@@ -189,8 +213,12 @@ def resolve_all_sectors() -> list[SectorInstrument]:
     instruments = []
     for sector, cfg in SECTOR_CANDIDATES.items():
         inst = resolve_sector_instrument(sector, cfg)
-        kind = "ETF" if inst.is_tradeable_etf else "INDEX (fallback — no liquid ETF)"
-        print(f"   {sector:20s} -> {inst.ticker:20s} [{kind}] avg_vol={inst.avg_volume:,.0f}")
+        if inst.ticker is None:
+            print(f"   {sector:20s} -> ⚠️  NO WORKING DATA SOURCE (no ETF, no index fallback)")
+        else:
+            kind = "ETF" if inst.is_tradeable_etf else "INDEX (fallback — no liquid ETF)"
+            proxy_note = " ⚠️ APPROXIMATE PROXY, not true sector index" if sector == "Power" else ""
+            print(f"   {sector:20s} -> {inst.ticker:20s} [{kind}] avg_vol={inst.avg_volume:,.0f}{proxy_note}")
         instruments.append(inst)
     return instruments
 
@@ -239,18 +267,21 @@ def _drawdown_tier(drawdown_pct: float) -> int:
 
 
 def _rsi_tier(rsi_at_cross: float) -> int:
-    if 45 <= rsi_at_cross <= 60:
+    # Gradient, not flat bands: deeper oversold at the moment of cross scores
+    # higher. Ceiling of 60 is already enforced upstream (CONTRA_RSI_CROSS_CEILING).
+    if rsi_at_cross <= 30:
+        return 5
+    if rsi_at_cross <= 40:
+        return 4
+    if rsi_at_cross <= 50:
         return 3
-    if 35 <= rsi_at_cross < 45:
-        return 2
-    if rsi_at_cross < 35:
-        return 1
-    return 0
+    return 2  # 51-60, still a valid cross, lowest tier
 
 
 def _quality_bucket(score: int, max_score: int) -> str:
     # Rescaled thresholds since there's no volume-spike component here
-    # (stock-level Contra maxes at 7; this sector version maxes lower).
+    # (stock-level Contra maxes at 7; this sector version maxes higher
+    # now with RSI-gradient + rotation + cross-sector layers).
     pct = score / max_score if max_score else 0
     if pct >= 0.80:
         return "PREMIUM"
@@ -261,7 +292,47 @@ def _quality_bucket(score: int, max_score: int) -> str:
     return "LOW"
 
 
-def detect_sector_contra_signal(inst: SectorInstrument) -> Optional[SectorContraSignal]:
+def _rotation_bonus(sector: str, rotation_lookup: dict) -> int:
+    """Rewards a fired Contra signal in a sector that's ALSO showing relative
+    strength / improving rank in the Rotation ranking. Never penalizes a
+    weak-rotation sector -- the RSI cross alone is still enough to fire."""
+    row = rotation_lookup.get(sector)
+    if row is None:
+        return 0
+    bonus = 0
+    if row.rank <= 3:
+        bonus += 2
+    elif row.rank <= 6:
+        bonus += 1
+    if row.trend == "UP":
+        bonus += 1
+    return bonus
+
+
+def _cross_sector_rsi_bonus(sector: str, rsi_percentile_map: dict) -> int:
+    """Rewards a sector whose current RSI is relatively LOW compared to the
+    other 12 sectors right now -- i.e. more differentiated/oversold versus
+    peers, not just oversold on its own multi-year history. percentile: 0.0
+    = lowest RSI of the group (most oversold relative to peers), 1.0 = highest."""
+    pct = rsi_percentile_map.get(sector)
+    if pct is None:
+        return 0
+    if pct <= 1 / 3:
+        return 2
+    if pct <= 2 / 3:
+        return 1
+    return 0
+
+
+def detect_sector_contra_signal(
+    inst: SectorInstrument,
+    contra_regime: str,
+    rsi_percentile_map: Optional[dict] = None,
+    rotation_lookup: Optional[dict] = None,
+) -> Optional[SectorContraSignal]:
+    if inst.ticker is None:
+        return None
+
     df = fetch_weekly_prices(inst.ticker)
     if df.empty or len(df) < RSI_PERIOD + RSI_SMA_PERIOD + 2:
         return None
@@ -295,8 +366,18 @@ def detect_sector_contra_signal(inst: SectorInstrument) -> Optional[SectorContra
     dd_tier = _drawdown_tier(latest["drawdown"])
     rsi_tier = _rsi_tier(latest["rsi"])
     reconfirm_bonus = 1 if re_confirmed else 0
-    score = dd_tier + rsi_tier + reconfirm_bonus
-    max_score = 3 + 3 + 1  # dd_tier max + rsi_tier max + reconfirm bonus
+    # Regime bonus -- matches stock-level Contra: your backtest found CAUTION
+    # is historically the best entry environment, BULL the noisiest, so this
+    # rewards signals firing in CAUTION/BEAR the same way stock-level does.
+    regime_bonus = 1 if contra_regime in ("CAUTION", "BEAR") else 0
+    rotation_bonus = _rotation_bonus(inst.sector, rotation_lookup or {})
+    cross_sector_bonus = _cross_sector_rsi_bonus(inst.sector, rsi_percentile_map or {})
+
+    score = (dd_tier + rsi_tier + reconfirm_bonus + regime_bonus
+             + rotation_bonus + cross_sector_bonus)
+    # dd_tier max(3) + rsi_tier max(5) + reconfirm(1) + regime(1)
+    # + rotation max(2 rank + 1 trend = 3) + cross-sector max(2)
+    max_score = 3 + 5 + 1 + 1 + 3 + 2
 
     bucket = _quality_bucket(score, max_score)
 
@@ -311,17 +392,29 @@ def detect_sector_contra_signal(inst: SectorInstrument) -> Optional[SectorContra
         re_confirmed=re_confirmed,
         quality_bucket=bucket,
         quality_score=score,
+        rotation_bonus=rotation_bonus,
+        cross_sector_bonus=cross_sector_bonus,
     )
 
 
-def screen_sector_contra(instruments: list[SectorInstrument]) -> list[SectorContraSignal]:
-    print("\n📊 Sector Contra (Phase 2 only — drawdown + RSI cross, no volume gate)...")
+def screen_sector_contra(
+    instruments: list[SectorInstrument],
+    contra_regime: str,
+    rsi_percentile_map: dict,
+    rotation_lookup: dict,
+) -> list[SectorContraSignal]:
+    print("\n📊 Sector Contra (Phase 2 — RSI gradient + drawdown + rotation + "
+          "cross-sector RSI + regime, no volume gate)...")
     signals = []
     for inst in instruments:
-        sig = detect_sector_contra_signal(inst)
+        if inst.ticker is None:
+            print(f"   ⚠️  {inst.sector:20s} skipped — no data source")
+            continue
+        sig = detect_sector_contra_signal(inst, contra_regime, rsi_percentile_map, rotation_lookup)
         if sig:
-            print(f"   ✅ {sig.sector:20s} SIGNAL — {sig.quality_bucket} "
-                  f"(RSI {sig.rsi_at_cross}, DD {sig.drawdown_pct}%)")
+            print(f"   ✅ {sig.sector:20s} SIGNAL — {sig.quality_bucket} (score {sig.quality_score}) "
+                  f"RSI {sig.rsi_at_cross} | DD {sig.drawdown_pct}% | "
+                  f"rot_bonus +{sig.rotation_bonus} | xsec_bonus +{sig.cross_sector_bonus}")
             signals.append(sig)
         else:
             print(f"   —  {inst.sector:20s} no signal")
@@ -358,6 +451,9 @@ def compute_rotation_ranking(instruments: list[SectorInstrument]) -> list[Sector
     rows = []
 
     for inst in instruments:
+        if inst.ticker is None:
+            print(f"   ⚠️  {inst.sector:20s} skipped — no data source")
+            continue
         df = fetch_weekly_prices(inst.ticker, weeks=40)
         if df.empty:
             continue
@@ -422,6 +518,49 @@ def compute_rotation_ranking(instruments: list[SectorInstrument]) -> list[Sector
 
 
 # --------------------------------------------------------------------------
+# Cross-sector RSI comparison -- how oversold is this sector RIGHT NOW
+# relative to the other 12, not just relative to its own multi-year history.
+# --------------------------------------------------------------------------
+
+def _get_current_rsi(ticker: str) -> Optional[float]:
+    df = fetch_weekly_prices(ticker, weeks=60)
+    if df.empty or len(df) < RSI_PERIOD + 2:
+        return None
+    rsi = compute_rsi(df["Close"]).dropna()
+    if rsi.empty:
+        return None
+    return float(rsi.iloc[-1])
+
+
+def compute_cross_sector_rsi_ranks(instruments: list[SectorInstrument]) -> dict:
+    """Returns {sector: percentile} where percentile 0.0 = lowest current RSI
+    of the group (most oversold relative to peers right now), 1.0 = highest."""
+    print("\n🔀 Cross-sector RSI comparison (relative oversold ranking)...")
+    rsi_map = {}
+    for inst in instruments:
+        if inst.ticker is None:
+            continue
+        val = _get_current_rsi(inst.ticker)
+        if val is not None:
+            rsi_map[inst.sector] = val
+
+    if not rsi_map:
+        print("   ⚠️  No sectors resolved a current RSI value -- skipping.")
+        return {}
+
+    ordered = sorted(rsi_map.items(), key=lambda kv: kv[1])
+    n = len(ordered)
+    percentile_map = {}
+    for i, (sector, val) in enumerate(ordered):
+        pct = i / (n - 1) if n > 1 else 0.0
+        percentile_map[sector] = pct
+        tag = "most oversold vs peers" if pct <= 1 / 3 else ("mid" if pct <= 2 / 3 else "least oversold vs peers")
+        print(f"   #{i + 1:<2d} {sector:20s} RSI {val:5.1f}  ({tag})")
+
+    return percentile_map
+
+
+# --------------------------------------------------------------------------
 # Output formatting
 # --------------------------------------------------------------------------
 
@@ -448,7 +587,7 @@ def format_telegram_section(
         for s in signals:
             tag = "✅ ETF" if s.is_tradeable_etf else "⚠️ Index-only (no liquid ETF)"
             lines.append(
-                f"• {s.sector} ({s.ticker}) — {s.quality_bucket} | "
+                f"• {s.sector} ({s.ticker}) — {s.quality_bucket} (score {s.quality_score}) | "
                 f"RSI {s.rsi_at_cross} | DD {s.drawdown_pct}% | {tag}"
             )
     else:
@@ -478,6 +617,7 @@ def format_telegram_section(
 SECTOR_CONTRA_METRICS = [
     "is_tradeable_etf", "signal_date", "rsi_at_cross", "drawdown_pct",
     "cross_failed", "re_confirmed", "quality_bucket", "quality_score",
+    "rotation_bonus", "cross_sector_bonus",
 ]
 
 SECTOR_ROTATION_METRICS = [
@@ -518,15 +658,20 @@ def export_to_sheet(contra_df: pd.DataFrame, rotation_df: pd.DataFrame) -> None:
 # Entry point
 # --------------------------------------------------------------------------
 
-def run_sector_screener() -> dict:
+def run_sector_screener(contra_regime: str) -> dict:
     print("=" * 65)
     print("SECTOR SCREENER")
     print("=" * 65)
 
     instruments = resolve_all_sectors()
 
-    contra_signals = screen_sector_contra(instruments)
+    # Rotation and cross-sector RSI both need to exist BEFORE Contra scoring
+    # now, since Contra's score uses them as bonus layers.
     rotation_rows = compute_rotation_ranking(instruments)
+    rotation_lookup = {row.sector: row for row in rotation_rows}
+    rsi_percentile_map = compute_cross_sector_rsi_ranks(instruments)
+
+    contra_signals = screen_sector_contra(instruments, contra_regime, rsi_percentile_map, rotation_lookup)
 
     contra_df = contra_signals_to_df(contra_signals)
     rotation_df = rotation_to_df(rotation_rows)
@@ -536,13 +681,16 @@ def run_sector_screener() -> dict:
     telegram_text = format_telegram_section(contra_signals, rotation_rows)
 
     etf_count = sum(1 for i in instruments if i.is_tradeable_etf)
+    no_data_count = sum(1 for i in instruments if i.ticker is None)
+    index_count = len(instruments) - etf_count - no_data_count
     print(f"""
 {'='*65}
 SECTOR SCREENER RESULTS
 {'='*65}
   Sectors screened     : {len(instruments)}
   Tradeable ETF found  : {etf_count}/{len(instruments)}
-  Index-only fallback  : {len(instruments) - etf_count}/{len(instruments)}
+  Index-only fallback  : {index_count}/{len(instruments)}
+  No data source       : {no_data_count}/{len(instruments)}
   Contra signals fired : {len(contra_signals)}
   Rotation ranked      : {len(rotation_rows)}
 {'='*65}
@@ -557,5 +705,7 @@ SECTOR SCREENER RESULTS
 
 
 if __name__ == "__main__":
-    result = run_sector_screener()
+    # Standalone/local test run -- no live contra_regime available outside
+    # main.py's pipeline, so default to NEUTRAL (no regime bonus applied).
+    result = run_sector_screener(contra_regime="NEUTRAL")
     print(result["telegram_text"])
