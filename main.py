@@ -57,8 +57,9 @@ def main():
     # ── Export + Telegram (Contra only — Momentum now runs standalone) ────
     export_and_notify(contra_df, p2_df, p1_df, contra_regime)
 
-    # ── Sector Signals (Contra Phase 2 only + rotation ranking) ───────────
-    sector_results = run_sector_screener()
+    # ── Sector Signals (Contra Phase 2, RSI gradient + rotation + cross-
+    # sector RSI + regime bonuses) ─────────────────────────────────────
+    sector_results = run_sector_screener(contra_regime)
     if not sector_results["contra_df"].empty or not sector_results["rotation_df"].empty:
         send_telegram(sector_results["telegram_text"])
     else:
