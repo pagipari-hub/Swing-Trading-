@@ -35,6 +35,8 @@ MOMENTUM_METRICS = [
     "vol_ratio", "new_52w_high", "new_5y_high",
     "pillar_a", "pillar_b", "pillar_c", "pillar_d",
     "cross_failed", "re_confirmed",
+    # ROC forward-test overlay (roc_score.py) — additive, not part of total_score
+    "roc_5", "roc_20", "roc_score", "roc_signal",
 ]
 
 

@@ -16,6 +16,7 @@ from config import (
     FLOOR_PROMOTER_MIN, CYCLICAL_NSE,
 )
 from helpers import safe_get, pct_ret, yoy_growth, fmt
+from roc_score import compute_momentum_roc
 
 
 def run_momentum_screener(nifty500, price_data, fund_data, q_fin_data,
@@ -150,6 +151,7 @@ def run_momentum_screener(nifty500, price_data, fund_data, q_fin_data,
                     "vol_ratio": "—", "new_52w_high": "—", "new_5y_high": "—",
                     "pillar_a": 0, "pillar_b": 0, "pillar_c": 0, "pillar_d": 0,
                     "cross_failed": "—", "re_confirmed": "—",
+                    "roc_5": "—", "roc_20": "—", "roc_score": "—", "roc_signal": "—",
                 })
                 continue
     
@@ -168,6 +170,7 @@ def run_momentum_screener(nifty500, price_data, fund_data, q_fin_data,
                     "vol_ratio": "—", "new_52w_high": "—", "new_5y_high": "—",
                     "pillar_a": 0, "pillar_b": 0, "pillar_c": 0, "pillar_d": 0,
                     "cross_failed": "—", "re_confirmed": "—",
+                    "roc_5": "—", "roc_20": "—", "roc_score": "—", "roc_signal": "—",
                 })
                 continue
     
@@ -240,6 +243,10 @@ def run_momentum_screener(nifty500, price_data, fund_data, q_fin_data,
                 except Exception:
                     pass
     
+            # ROC forward-test overlay — additive only, does NOT feed into
+            # pillar_a/b/c/d or total below. See roc_score.py header.
+            roc = compute_momentum_roc(close, vol_ratio, rsi_now)
+
             r1m = pct_ret(close, 4);  rs1 = (r1m or 0) - idx_1m
             r3m = pct_ret(close, 13); rs3 = (r3m or 0) - idx_3m
             r6m = pct_ret(close, 26); rs6 = (r6m or 0) - idx_6m
@@ -372,6 +379,8 @@ def run_momentum_screener(nifty500, price_data, fund_data, q_fin_data,
                 "pillar_c": pillar_c, "pillar_d": pillar_d,
                 "cross_failed": "Yes" if cross_failed else "No",
                 "re_confirmed": "Yes" if re_confirmed else "No",
+                "roc_5": fmt(roc["roc_5"], 2), "roc_20": fmt(roc["roc_20"], 2),
+                "roc_score": fmt(roc["roc_score"], 1), "roc_signal": roc["roc_signal"],
             })
     
         except Exception:
@@ -381,7 +390,8 @@ def run_momentum_screener(nifty500, price_data, fund_data, q_fin_data,
         "week","ticker","company","sector","price","score","label",
         "RSI","rs_periods","earn_gr","pct_from_high","vol_ratio",
         "new_52w_high","new_5y_high",
-        "pillar_a","pillar_b","pillar_c","pillar_d","cross_failed","re_confirmed"
+        "pillar_a","pillar_b","pillar_c","pillar_d","cross_failed","re_confirmed",
+        "roc_5","roc_20","roc_score","roc_signal"
     ])
     
     mom_entry    = momentum_df[momentum_df["label"].str.startswith(("🔥","⚡"), na=False)].copy()

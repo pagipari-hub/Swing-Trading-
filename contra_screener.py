@@ -21,6 +21,7 @@ from config import (
     CONTRA_GATE_PROMOTER_MIN,
 )
 from helpers import safe_get, yoy_growth, fmt
+from roc_score import compute_contra_roc
 
 
 def compute_sector_drawdown_baseline(nifty500, price_data, sector_lookup):
@@ -140,7 +141,11 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
             drawdown = (high_52w - price) / high_52w * 100
             pct_from_low = (price - low_52w) / low_52w * 100 if low_52w > 0 else 0
             low_confirmed = 25 <= pct_from_low <= 60
-    
+
+            # ROC forward-test overlay — additive only, does NOT feed into
+            # pillar_a/pillar_b/total below. See roc_score.py header.
+            roc = compute_contra_roc(close, vol_ratio, drawdown)
+
             # promoter holding via Screener.in scrape (see promoter_scraper.py) —
             # yfinance's heldPercentInsiders does not populate for NSE tickers,
             # confirmed empirically across 6 weeks of live data. Screener.in
@@ -190,6 +195,8 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
                     "pct_from_low": fmt(pct_from_low, 1), "low_confirmed": "—",
                     "pillar_a": 0, "pillar_b": 0, "quality_score": 0, "quality_bucket": "—",
                     "archetype_a": "No", "cross_failed": "—", "re_confirmed": "—",
+                    "roc_3": "—", "roc_14": "—", "roc_zscore": "—",
+                    "roc_score": "—", "roc_signal": "—",
                 })
                 continue
     
@@ -290,6 +297,9 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
                 "archetype_a": "Yes" if archetype_a else "No",
                 "cross_failed": "Yes" if cross_failed else "No",
                 "re_confirmed": "Yes" if re_confirmed else "No",
+                "roc_3": fmt(roc["roc_3"], 2), "roc_14": fmt(roc["roc_14"], 2),
+                "roc_zscore": fmt(roc["roc_zscore"], 2),
+                "roc_score": fmt(roc["roc_score"], 1), "roc_signal": roc["roc_signal"],
             })
     
         except Exception:
@@ -299,7 +309,8 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
         "week","ticker","company","sector","price","score","phase",
         "RSI","drawdown","de_ratio","cross_week","vol_ratio","promoter",
         "sales_gr","pat_gr","pct_from_low","low_confirmed","pillar_a","pillar_b",
-        "quality_score","quality_bucket","archetype_a","cross_failed","re_confirmed"
+        "quality_score","quality_bucket","archetype_a","cross_failed","re_confirmed",
+        "roc_3","roc_14","roc_zscore","roc_score","roc_signal"
     ])
     
     p2_df = contra_df[contra_df["phase"] == "Phase 2 - Entry Ready"].copy()

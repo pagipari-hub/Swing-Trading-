@@ -76,12 +76,16 @@ CONTRA_METRICS = [
     "cross_week", "vol_ratio", "promoter", "sales_gr", "pat_gr",
     "pct_from_low", "low_confirmed", "pillar_a", "pillar_b",
     "quality_score", "quality_bucket", "archetype_a",
-    "cross_failed", "re_confirmed"
+    "cross_failed", "re_confirmed",
+    # ROC forward-test overlay (roc_score.py) — additive, not part of total_score
+    "roc_3", "roc_14", "roc_zscore", "roc_score", "roc_signal",
 ]
 
 MOMENTUM_METRICS = [
     "price", "total_score", "label", "RSI", "rs_periods", "earn_gr",
     "pct_from_high", "vol_ratio", "new_52w_high", "new_5y_high",
     "pillar_a", "pillar_b", "pillar_c", "pillar_d",
-    "cross_failed", "re_confirmed"
+    "cross_failed", "re_confirmed",
+    # ROC forward-test overlay (roc_score.py) — additive, not part of total_score
+    "roc_5", "roc_20", "roc_score", "roc_signal",
 ]
