@@ -55,6 +55,24 @@ def compute_roc_zscore(close: pd.Series, periods: int, lookback_weeks: int = 52)
         return None
 
 
+def _turn_score(value, max_pts: float, half_life: float):
+    """
+    Rewards the INFLECTION, not the extension.
+
+    - value <= 0        -> 0 (still negative, no credit)
+    - value just > 0     -> ~max_pts (right at the turn, full credit)
+    - value increasing    -> smoothly decays toward 0 (chasing an
+                              already-extended move earns less)
+
+    half_life = how many ROC points it takes to halve the score.
+    e.g. half_life=5 means a value of 5 scores max_pts/2, value of 10
+    scores max_pts/4, etc. Never goes negative, never exceeds max_pts.
+    """
+    if value is None or value <= 0:
+        return 0.0
+    return float(max_pts * (0.5 ** (value / half_life)))
+
+
 def compute_momentum_roc(close: pd.Series, vol_ratio, rsi):
     """
     Momentum-side ROC score (0-100) — bullish continuation signal.
@@ -74,8 +92,11 @@ def compute_momentum_roc(close: pd.Series, vol_ratio, rsi):
 
     score = 0.0
 
-    # 1. Acceleration spread — short-term ROC outpacing longer-term (0-35)
-    score += float(np.clip((roc5 - roc20) * 2.5, 0, 35))
+    # 1. Acceleration turn — rewards the SPREAD (roc5 - roc20) just crossing
+    # positive (short-term newly outpacing long-term), not an already-huge
+    # spread (that's chasing a move that's run too far). 0-35, half_life=8.
+    spread = roc5 - roc20
+    score += _turn_score(spread, max_pts=35, half_life=8)
 
     # 2. Volume confirmation (0-25)
     if vol_ratio is not None:
@@ -122,12 +143,14 @@ def compute_contra_roc(close: pd.Series, vol_ratio, drawdown):
     if z14 < 0:
         score += float(np.clip(abs(z14) * 15, 0, 35))
 
-    # 2. Curl confirmation — short-term turning up inside a longer downtrend (0-25)
-    if roc3 is not None and roc20 is not None:
-        if roc3 > 0 and roc20 < 0:
-            score += 25
-        elif roc3 > 0:
-            score += 10
+    # 2. Curl turn — rewards roc3 just crossing from negative to positive
+    # (the inflection itself), decaying as the bounce extends further.
+    # 0-20, half_life=5. Small +5 context bonus if this turn is happening
+    # while the longer window (roc20) is still negative — i.e. a genuine
+    # reversal inside a downtrend, not just noise.
+    score += _turn_score(roc3, max_pts=20, half_life=5)
+    if roc20 is not None and roc20 < 0 and roc3 is not None and roc3 > 0:
+        score += 5
 
     # 3. Drawdown context bonus (0-20)
     if drawdown is not None and drawdown > 15:
