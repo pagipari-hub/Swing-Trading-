@@ -1,0 +1,37 @@
+name: Conviction Backtest (Manual)
+
+# Manual only. Actions tab -> "Conviction Backtest (Manual)" -> Run workflow.
+# Prints the cohort table in the run log and attaches conviction_backtest.csv
+# as a downloadable artifact. Read-only: it never writes to the Google Sheet.
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run conviction backtest
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python conviction_backtest.py
+
+      - name: Upload CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: conviction_backtest
+          path: conviction_backtest.csv
