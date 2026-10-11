@@ -12,6 +12,9 @@
 # works on W24 onwards immediately — you do not have to wait for
 # the live conviction columns to build up history.
 #
+# Cohorts are TOP-10 ONLY: each week the 10 highest total_score rows
+# (what you actually look at), and "new" = ticker was not in the
+# previous week's top 10, i.e. the first week you would have entered.
 # Forward return = price N week-columns later / price this week - 1,
 # for N = 1, 4, 8, 12 weeks, plus "td" = hold until the latest week.
 # Run:  python conviction_backtest.py      (needs GOOGLE_SERVICE_ACCOUNT_JSON)
@@ -66,25 +69,37 @@ def build_history(tickers_meta, week_cols, metric_series):
             later = [prices[w] for w in week_cols[i + 1:] if prices.get(w)]
             rec["fwd_td"] = (later[-1] / price - 1) * 100 if later else None
             out.append(rec)
-    return pd.DataFrame(out)
+    df = pd.DataFrame(out)
+    return tag_top10(df) if not df.empty else df
+
+
+def tag_top10(df):
+    """Adds top10 (top 10 total_score that week) and new_top10 (not in last week's top 10)."""
+    df = df.sort_values(["week", "total_score", "ticker"],
+                        ascending=[True, False, True]).reset_index(drop=True)
+    df["top10"] = df.groupby("week").cumcount() < 10
+    weeks = sorted(df["week"].unique())
+    top_sets = {w: set(df[(df["week"] == w) & df["top10"]]["ticker"]) for w in weeks}
+    prev_week = {w: (weeks[i - 1] if i > 0 else None) for i, w in enumerate(weeks)}
+    df["new_top10"] = [
+        bool(t10) and (prev_week[w] is None or tk not in top_sets[prev_week[w]])
+        for t10, w, tk in zip(df["top10"], df["week"], df["ticker"])
+    ]
+    return df
 
 
 def cohorts(df):
-    """Cohort name -> boolean mask. 'Strict filter' = the Contra Entry sheet rule."""
-    d = pd.to_numeric(df["dd_delta"], errors="coerce")
-    r = pd.to_numeric(df["rsi_delta"], errors="coerce")
-    strict = ((df["total_score"] >= 50) & (df["conviction_score"] >= 70) &
-              (df["fund_pass"] == "PASS") & (r > 0) & (d > 0) & (df["lev_pass"] == "PASS"))
-    p2 = df["phase"] == "Phase 2 - Entry Ready"
+    """Top-10-per-week cohorts. 'New' = first week in the top 10 (entry week only)."""
+    new = df["new_top10"]
     return {
-        "All screened rows":           df["total_score"] > 0,
-        "Phase 2 (old rule)":          p2,
-        "total_score >= 50":           df["total_score"] >= 50,
-        "BUY":                         df["action"] == "BUY",
-        "VALUE TRAP":                  df["action"] == "VALUE TRAP",
-        "score>=50 but WATCH":         (df["total_score"] >= 50) & (df["action"] == "WATCH"),
-        "Phase 2 AND BUY":             p2 & (df["action"] == "BUY"),
-        "Strict sheet filter":         strict,
+        "All screened (market)":   df["total_score"] > 0,
+        "Top10 all weeks":         df["top10"],
+        "Top10 NEW entries":       new,
+        "NEW + BUY":               new & (df["action"] == "BUY"),
+        "NEW + VALUE TRAP":        new & (df["action"] == "VALUE TRAP"),
+        "NEW + WATCH":             new & (df["action"] == "WATCH"),
+        "NEW + fund_pass PASS":    new & (df["fund_pass"] == "PASS"),
+        "NEW + fund_pass FAIL":    new & (df["fund_pass"] == "FAIL"),
     }
 
 
