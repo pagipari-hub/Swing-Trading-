@@ -48,6 +48,12 @@ CONTRA_GATE_DE_MAX       = 150   # debt/equity must be <= this
 CONTRA_GATE_SALES_MIN    = -15   # revenue YoY must be > this
 CONTRA_GATE_PROMOTER_MIN = 20    # promoter holding must be >= this
 
+# ── Contra: conviction layer (sits ON TOP of total_score; never changes it) ──
+CONVICTION_RSI_RECOVERY_MIN         = 2.0   # RSI must have risen by more than this vs last week
+CONVICTION_DRAWDOWN_IMPROVEMENT_MIN = 2.0   # drawdown must have shrunk by more than this (pts) vs last week
+CONVICTION_BUY_THRESHOLD            = 70    # conviction_score >= this (and total_score >= 50, fund_pass) -> BUY
+CONVICTION_WATCH_THRESHOLD          = 50    # reserved for the WATCH band; the action rule itself falls through to WATCH
+
 # ── Momentum: scoring / filter thresholds ────────────────────
 WEEKS_VALID   = 3
 RSI_UPPER     = 75
@@ -79,6 +85,10 @@ CONTRA_METRICS = [
     "cross_failed", "re_confirmed",
     # ROC forward-test overlay (roc_score.py) — additive, not part of total_score
     "roc_3", "roc_14", "roc_zscore", "roc_score", "roc_signal",
+    # Conviction layer (contra_screener.compute_conviction) — additive, not part of total_score
+    "conviction_score", "fund_pass", "lev_pass", "rsi_delta", "dd_delta", "action",
+    # Backtest helper: % price change vs previous week's close
+    "wk_return",
 ]
 
 MOMENTUM_METRICS = [
