@@ -19,6 +19,8 @@ import ta
 from config import (
     CONTRA_NIFTY_INDEX, CONTRA_GATE_DE_MAX, CONTRA_GATE_SALES_MIN,
     CONTRA_GATE_PROMOTER_MIN,
+    CONVICTION_RSI_RECOVERY_MIN, CONVICTION_DRAWDOWN_IMPROVEMENT_MIN,
+    CONVICTION_BUY_THRESHOLD,
 )
 from helpers import safe_get, yoy_growth, fmt
 from roc_score import compute_contra_roc
@@ -93,6 +95,107 @@ def compute_contra_regime(nifty500, price_data):
     return contra_regime
 
 
+def _num(v):
+    """Row values arrive as rounded floats or the "—" placeholder; return float or None."""
+    try:
+        if v is None or isinstance(v, bool):
+            return None
+        f = float(v)
+        return None if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _pass_fail(flag):
+    """True/False/None -> "PASS"/"FAIL"/"N/A" (the strings the Sheets formulas test against)."""
+    return "N/A" if flag is None else ("PASS" if flag else "FAIL")
+
+
+def compute_conviction(row, prev_row=None):
+    """
+    Conviction layer on top of the Contra total_score (row["score"]).
+    Does NOT change total_score. Encodes the W24->W35 backtest lesson:
+    winners had positive sales/PAT, RSI recovery and shrinking drawdown;
+    losers had weak fundamentals, high leverage and a deepening drawdown.
+
+    row      : a contra_rows dict (values may be floats or the "—" placeholder)
+    prev_row : {"RSI": float, "drawdown": float} for the previous week, or None
+
+    Missing inputs (growth/D-E not reported, no previous week) are treated
+    as UNKNOWN: they get a 0 adjustment and show "N/A" / "—" rather than
+    being scored as a failure. Unknown fundamentals can therefore never
+    produce a VALUE TRAP or a BUY — the stock stays WATCH.
+
+    Returns dict: conviction_score, fund_pass, lev_pass, rsi_delta,
+    dd_delta, action.
+    """
+    prev_row = prev_row or {}
+
+    total_score = _num(row.get("score")) or 0
+    sales_gr    = _num(row.get("sales_gr"))
+    pat_gr      = _num(row.get("pat_gr"))
+    de_ratio    = _num(row.get("de_ratio"))
+    rsi         = _num(row.get("RSI"))
+    dd          = _num(row.get("drawdown"))
+    prev_rsi    = _num(prev_row.get("RSI"))
+    prev_dd     = _num(prev_row.get("drawdown"))
+
+    # Fundamentals: both growth figures must be positive
+    if sales_gr is None or pat_gr is None:
+        fund_pass = None
+    else:
+        fund_pass = (sales_gr > 0) and (pat_gr > 0)
+
+    # Leverage: D/E is not meaningful for Financial Services (always passes)
+    if row.get("sector") == "Financial Services":
+        lev_pass = True
+    elif de_ratio is None:
+        lev_pass = None
+    else:
+        lev_pass = de_ratio < 100
+
+    # Week-over-week deltas (drawdown delta positive = drawdown shrinking)
+    rsi_delta = (rsi - prev_rsi) if (rsi is not None and prev_rsi is not None) else None
+    dd_delta  = (prev_dd - dd)   if (dd  is not None and prev_dd  is not None) else None
+
+    score = total_score
+
+    if fund_pass is True:    score += 20
+    elif fund_pass is False: score -= 20
+
+    if rsi_delta is not None:
+        score += 10 if rsi_delta > CONVICTION_RSI_RECOVERY_MIN else -10
+
+    if dd_delta is not None:
+        score += 10 if dd_delta > CONVICTION_DRAWDOWN_IMPROVEMENT_MIN else -10
+
+    score += {"PREMIUM": 15, "HIGH": 10, "MEDIUM": 5}.get(row.get("quality_bucket"), 0)
+
+    if lev_pass is True:    score += 5
+    elif lev_pass is False: score -= 5
+
+    if row.get("low_confirmed") == "Yes":
+        score += 5
+
+    conviction_score = int(round(max(0, min(100, score))))
+
+    if total_score >= 50 and conviction_score >= CONVICTION_BUY_THRESHOLD and fund_pass is True:
+        action = "BUY"
+    elif total_score >= 50 and fund_pass is False:
+        action = "VALUE TRAP"
+    else:
+        action = "WATCH"
+
+    return {
+        "conviction_score": conviction_score,
+        "fund_pass":        _pass_fail(fund_pass),
+        "lev_pass":         _pass_fail(lev_pass),
+        "rsi_delta":        fmt(rsi_delta, 1),
+        "dd_delta":         fmt(dd_delta, 1),
+        "action":           action,
+    }
+
+
 def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
                          sector_lookup, company_lookup, promoter_data,
                          sector_median_drawdown, contra_regime, week_tag):
@@ -102,6 +205,7 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
     print("=" * 65)
 
     contra_rows = []
+    prev_lookup = {}   # ticker -> previous week's RSI / drawdown / price (for conviction layer)
     
     for ticker in nifty500:
         df   = price_data.get(ticker)
@@ -141,6 +245,17 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
             drawdown = (high_52w - price) / high_52w * 100
             pct_from_low = (price - low_52w) / low_52w * 100 if low_52w > 0 else 0
             low_confirmed = 25 <= pct_from_low <= 60
+
+            # Previous week's readings, from the same weekly price series
+            # (bars are weekly, so iloc[-2] is last week). Used only by
+            # compute_conviction + wk_return after this loop.
+            prev_high = high_s.iloc[-53:-1].max()
+            prev_px   = close.iloc[-2]
+            prev_lookup[ticker] = {
+                "RSI":      rsi_s.iloc[-2],
+                "price":    prev_px,
+                "drawdown": (prev_high - prev_px) / prev_high * 100 if prev_high > 0 else None,
+            }
 
             # ROC forward-test overlay — additive only, does NOT feed into
             # pillar_a/pillar_b/total below. See roc_score.py header.
@@ -197,6 +312,8 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
                     "archetype_a": "No", "cross_failed": "—", "re_confirmed": "—",
                     "roc_3": "—", "roc_14": "—", "roc_zscore": "—",
                     "roc_score": "—", "roc_signal": "—",
+                    "conviction_score": "—", "fund_pass": "—", "lev_pass": "—",
+                    "rsi_delta": "—", "dd_delta": "—", "action": "—", "wk_return": "—",
                 })
                 continue
     
@@ -300,17 +417,36 @@ def run_contra_screener(nifty500, price_data, fund_data, q_fin_data,
                 "roc_3": fmt(roc["roc_3"], 2), "roc_14": fmt(roc["roc_14"], 2),
                 "roc_zscore": fmt(roc["roc_zscore"], 2),
                 "roc_score": fmt(roc["roc_score"], 1), "roc_signal": roc["roc_signal"],
+                # Filled in after the loop (conviction layer + backtest helper)
+                "conviction_score": "—", "fund_pass": "—", "lev_pass": "—",
+                "rsi_delta": "—", "dd_delta": "—", "action": "—", "wk_return": "—",
             })
     
         except Exception:
             continue
+    
+    # ── Conviction layer + weekly return (does not touch "score") ──────────
+    for r in contra_rows:
+        try:
+            prev = prev_lookup.get(r["ticker"])
+            if prev is None:
+                continue
+            cur_px, prev_px = _num(r["price"]), _num(prev.get("price"))
+            if cur_px is not None and prev_px:
+                r["wk_return"] = fmt((cur_px / prev_px - 1) * 100, 2)
+            if str(r["phase"]).startswith("Filtered"):
+                continue   # gated-out rows keep "—" placeholders
+            r.update(compute_conviction(r, prev))
+        except Exception as e:
+            print(f"  ⚠️  conviction failed for {r.get('ticker')}: {e}")
     
     contra_df = pd.DataFrame(contra_rows) if contra_rows else pd.DataFrame(columns=[
         "week","ticker","company","sector","price","score","phase",
         "RSI","drawdown","de_ratio","cross_week","vol_ratio","promoter",
         "sales_gr","pat_gr","pct_from_low","low_confirmed","pillar_a","pillar_b",
         "quality_score","quality_bucket","archetype_a","cross_failed","re_confirmed",
-        "roc_3","roc_14","roc_zscore","roc_score","roc_signal"
+        "roc_3","roc_14","roc_zscore","roc_score","roc_signal",
+        "conviction_score","fund_pass","lev_pass","rsi_delta","dd_delta","action","wk_return"
     ])
     
     p2_df = contra_df[contra_df["phase"] == "Phase 2 - Entry Ready"].copy()
@@ -328,6 +464,8 @@ CONTRA SCREENER RESULTS
   Archetype A signals : {len(contra_df[contra_df['archetype_a']=='Yes'])}
   Failed crosses       : {len(contra_df[contra_df['cross_failed']=='Yes'])}
   Re-confirmed crosses : {len(contra_df[contra_df['re_confirmed']=='Yes'])}
+  Conviction BUY       : {len(contra_df[contra_df['action']=='BUY'])}
+  Conviction VALUE TRAP: {len(contra_df[contra_df['action']=='VALUE TRAP'])}
 {'='*65}
 """)
 
