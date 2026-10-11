@@ -12,7 +12,8 @@
 # works on W24 onwards immediately — you do not have to wait for
 # the live conviction columns to build up history.
 #
-# Forward return = price N week-columns later / price this week - 1.
+# Forward return = price N week-columns later / price this week - 1,
+# for N = 1, 4, 8, 12 weeks, plus "td" = hold until the latest week.
 # Run:  python conviction_backtest.py      (needs GOOGLE_SERVICE_ACCOUNT_JSON)
 # Output: console table + conviction_backtest.csv (one row per ticker-week)
 # ============================================================
@@ -24,7 +25,7 @@ from sheets_io import get_gspread_client
 from performance_tracker import load_transposed_sheet, to_float
 from contra_screener import compute_conviction
 
-FWD_WEEKS = (1, 4)
+FWD_WEEKS = (1, 4, 8, 12)   # plus 'to_date' = hold until the latest week in the sheet
 
 
 def build_history(tickers_meta, week_cols, metric_series):
@@ -62,6 +63,8 @@ def build_history(tickers_meta, week_cols, metric_series):
             for n in FWD_WEEKS:
                 p_fwd = prices.get(week_cols[i + n]) if i + n < len(week_cols) else None
                 rec[f"fwd_{n}w"] = (p_fwd / price - 1) * 100 if p_fwd else None
+            later = [prices[w] for w in week_cols[i + 1:] if prices.get(w)]
+            rec["fwd_td"] = (later[-1] / price - 1) * 100 if later else None
             out.append(rec)
     return pd.DataFrame(out)
 
@@ -86,16 +89,16 @@ def cohorts(df):
 
 
 def summarize(df):
+    """One compact cell per horizon: 'avg% (win%) nN'. n shrinks at longer horizons."""
+    horizons = [(f"{n}w", f"fwd_{n}w") for n in FWD_WEEKS] + [("td", "fwd_td")]
     rows = []
     for name, mask in cohorts(df).items():
         sub = df[mask]
         rec = {"cohort": name, "n": len(sub)}
-        for n in FWD_WEEKS:
-            s = sub[f"fwd_{n}w"].dropna()
-            rec[f"n_{n}w"]    = len(s)
-            rec[f"avg_{n}w%"] = round(s.mean(), 2) if len(s) else None
-            rec[f"med_{n}w%"] = round(s.median(), 2) if len(s) else None
-            rec[f"win_{n}w%"] = round((s > 0).mean() * 100, 1) if len(s) else None
+        for label, col in horizons:
+            sr = sub[col].dropna()
+            rec[label] = (f"{sr.mean():.1f} ({(sr > 0).mean() * 100:.0f}%) n{len(sr)}"
+                          if len(sr) else "-")
         rows.append(rec)
     return pd.DataFrame(rows)
 
@@ -112,8 +115,9 @@ def main():
         print("No usable rows."); return
     df.to_csv("conviction_backtest.csv", index=False)
 
-    print("\nForward returns by cohort (a ticker can appear in many weeks — "
-          "overlapping samples, treat as indicative):\n")
+    print("\nForward return by cohort, cell = avg% (win%) nSamples. "
+          "td = hold till latest week. A ticker can appear in many weeks — "
+          "overlapping samples, treat as indicative:\n")
     print(summarize(df).to_string(index=False))
     print("\nWhat to look for: BUY / Strict filter should beat 'Phase 2 (old rule)' "
           "on avg AND win%, and VALUE TRAP should trail. Small n (<30) = noise.")
